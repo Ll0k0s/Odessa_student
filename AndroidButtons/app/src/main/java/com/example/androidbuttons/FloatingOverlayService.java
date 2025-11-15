@@ -46,11 +46,23 @@ public class FloatingOverlayService extends Service {
 	private static final long HEARTBEAT_INTERVAL_MS = 3000L;
 	private static final long STRIP_ANIM_DURATION = 1000L;  // Увеличено для более плавной анимации
 
+	// Базовые размеры overlay в пикселях (соотношение 476×2047 сведено к 100×430)
+	private static final int BASE_WIDTH_PX = 100;
+	private static final int BASE_HEIGHT_PX = 430;
+
+	// Прозрачность в режимах
+	private static final float ALPHA_EDIT_MODE = 0.7f;
+	private static final float ALPHA_NORMAL = 1.0f;
+
 	private final Handler mainHandler = new Handler(Looper.getMainLooper());
 	private final AtomicBoolean overlayAttached = new AtomicBoolean(false);
 
 	// Listener для изменений preferences (ВАЖНО: хранить сильную ссылку, иначе GC удалит!)
 	private android.content.SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
+
+	// BroadcastReceiver’ы для мгновенного применения позиции/масштаба
+	private android.content.BroadcastReceiver scaleReceiver;
+	private android.content.BroadcastReceiver positionReceiver;
 
 	private WindowManager windowManager;
 	private View overlayView;
@@ -62,15 +74,12 @@ public class FloatingOverlayService extends Service {
 	private int currentState = 0;
 	private int lastResId = 0;
 
-	// Отложенная стартовая альфа до момента создания overlayView
-	private float pendingInitialAlpha = 1.0f;
-
 	// Поля для отслеживания перемещения и изменения размера
 	private float initialTouchX;
 	private float initialTouchY;
 	private int initialX;
 	private int initialY;
-	
+
 	// Поля для pinch-to-zoom (масштабирование двумя пальцами)
 	private float initialDistance = 0;
 	private float initialScale = 1.0f;
@@ -87,9 +96,9 @@ public class FloatingOverlayService extends Service {
 	private enum GestureMode { NONE, MOVE, SCALE }
 	private GestureMode gestureMode = GestureMode.NONE;
 
-	// Add new flags near other gesture fields
-	private boolean didMoveDuringGesture = false; // tracks if any MOVE actually changed position
-	private boolean suppressMoveUntilUp = false; // after scaling, disallow move until full finger release
+	// Флаги для подавления лишних MOVE после pinch-жеста
+	private boolean didMoveDuringGesture = false; // трекер реального движения
+	private boolean suppressMoveUntilUp = false;  // блокировка MOVE до окончательного отпускания
 
 	/**
 	 * Слушатель событий от основной активити. Каждый вызов транслируем на главный поток, так как
@@ -131,20 +140,18 @@ public class FloatingOverlayService extends Service {
 			Log.e(TAG, "WindowManager unavailable");
 		}
 
-		// Слушатель изменений SharedPreferences для автоматического применения прозрачности
 		android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-		
-		// КРИТИЧЕСКИ ВАЖНО: сохраняем listener в поле класса, иначе GC удалит и он перестанет работать!
+
+		// Слушатель изменений SharedPreferences для автоматического применения прозрачности
 		preferenceListener = (sharedPreferences, key) -> {
 			Log.e(TAG, "═══════ PREF CHANGED: key=" + key + " ═══════");
 			if (AppState.KEY_OVERLAY_ALLOW_MODIFICATION.equals(key)) {
 				boolean allow = sharedPreferences.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-				float targetAlpha = allow ? 0.7f : 1.0f;
-				pendingInitialAlpha = targetAlpha;
-				
+				float targetAlpha = allow ? ALPHA_EDIT_MODE : ALPHA_NORMAL;
+
 				Log.e(TAG, "═══════ TARGET ALPHA=" + targetAlpha + " allow=" + allow + " overlayView=" + overlayView + " ═══════");
-				
-				// КРИТИЧЕСКИ ВАЖНО: применяем прозрачность немедленно через mainHandler
+
+				// Применяем прозрачность немедленно через mainHandler
 				mainHandler.post(() -> {
 					if (overlayView != null) {
 						overlayView.setAlpha(targetAlpha);
@@ -156,53 +163,54 @@ public class FloatingOverlayService extends Service {
 			}
 		};
 		prefs.registerOnSharedPreferenceChangeListener(preferenceListener);
-		// Применяем стартовую альфу согласно текущему флагу
+
+		// Регистрируем receiver для немедленного применения масштаба
+		scaleReceiver = new android.content.BroadcastReceiver() {
+			@Override
+			public void onReceive(android.content.Context context, android.content.Intent intent) {
+				if ("com.example.androidbuttons.APPLY_SCALE_NOW".equals(intent.getAction())) {
+					float scale = intent.getFloatExtra("scale", 1.0f);
+					applyScale(scale);
+					Log.d(TAG, "Scale applied immediately: " + scale);
+				}
+			}
+		};
+		android.content.IntentFilter scaleFilter = new android.content.IntentFilter("com.example.androidbuttons.APPLY_SCALE_NOW");
+		registerReceiver(scaleReceiver, scaleFilter);
+
+		// Регистрируем receiver для немедленного применения позиции
+		positionReceiver = new android.content.BroadcastReceiver() {
+			@Override
+			public void onReceive(android.content.Context context, android.content.Intent intent) {
+				if ("com.example.androidbuttons.APPLY_POSITION_NOW".equals(intent.getAction())) {
+					if (overlayParams == null || windowManager == null) return;
+
+					if (intent.hasExtra("x")) {
+						int x = intent.getIntExtra("x", overlayParams.x);
+						int compensatedX = (x == 0) ? -computeLeftCompensation() : x;
+						overlayParams.x = compensatedX;
+					}
+					if (intent.hasExtra("y")) {
+						overlayParams.y = intent.getIntExtra("y", overlayParams.y);
+					}
+
+					try {
+						windowManager.updateViewLayout(overlayView, overlayParams);
+						Log.d(TAG, "Position applied immediately: x=" + overlayParams.x + " y=" + overlayParams.y);
+					} catch (Exception e) {
+						Log.e(TAG, "Failed to apply position", e);
+					}
+				}
+			}
+		};
+		android.content.IntentFilter positionFilter = new android.content.IntentFilter("com.example.androidbuttons.APPLY_POSITION_NOW");
+		registerReceiver(positionReceiver, positionFilter);
+
 		boolean allowAtStart = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-		pendingInitialAlpha = allowAtStart ? 0.7f : 1.0f;
-		Log.d(TAG, "Initial overlay alpha based on allowModification=" + allowAtStart + " -> " + pendingInitialAlpha);
-		
-        // Регистрируем receiver для немедленного применения масштаба
-        android.content.BroadcastReceiver scaleReceiver = new android.content.BroadcastReceiver() {
-            @Override
-            public void onReceive(android.content.Context context, android.content.Intent intent) {
-                if ("com.example.androidbuttons.APPLY_SCALE_NOW".equals(intent.getAction())) {
-                    float scale = intent.getFloatExtra("scale", 1.0f);
-                    applyScale(scale);
-                    Log.d(TAG, "Scale applied immediately: " + scale);
-                }
-            }
-        };
-        android.content.IntentFilter scaleFilter = new android.content.IntentFilter("com.example.androidbuttons.APPLY_SCALE_NOW");
-        registerReceiver(scaleReceiver, scaleFilter);
-        
-        // Регистрируем receiver для немедленного применения позиции
-        android.content.BroadcastReceiver positionReceiver = new android.content.BroadcastReceiver() {
-            @Override
-            public void onReceive(android.content.Context context, android.content.Intent intent) {
-                if ("com.example.androidbuttons.APPLY_POSITION_NOW".equals(intent.getAction())) {
-                    if (overlayParams == null || windowManager == null) return;
-                    
-                    if (intent.hasExtra("x")) {
-                        int x = intent.getIntExtra("x", overlayParams.x);
-                        int compensatedX = (x == 0) ? -computeLeftCompensation() : x;
-                        overlayParams.x = compensatedX;
-                    }
-                    if (intent.hasExtra("y")) {
-                        overlayParams.y = intent.getIntExtra("y", overlayParams.y);
-                    }
-                    
-                    try {
-                        windowManager.updateViewLayout(overlayView, overlayParams);
-                        Log.d(TAG, "Position applied immediately: x=" + overlayParams.x + " y=" + overlayParams.y);
-                    } catch (Exception e) {
-                        Log.e(TAG, "Failed to apply position", e);
-                    }
-                }
-            }
-        };
-        android.content.IntentFilter positionFilter = new android.content.IntentFilter("com.example.androidbuttons.APPLY_POSITION_NOW");
-        registerReceiver(positionReceiver, positionFilter);
-    }	@Override
+		Log.d(TAG, "Initial overlay alpha based on allowModification=" + allowAtStart);
+	}
+
+	@Override
 	public int onStartCommand(Intent intent, int flags, int startId) {
 		Log.i(TAG, "onStartCommand flags=" + flags + " startId=" + startId);
 		Notification notification = buildNotification();
@@ -225,6 +233,38 @@ public class FloatingOverlayService extends Service {
 		Log.i(TAG, "onDestroy");
 		mainHandler.removeCallbacks(heartbeatRunnable);
 		detachOverlay();
+
+		// Снимаем listener преференсов
+		if (preferenceListener != null) {
+			try {
+				android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
+				prefs.unregisterOnSharedPreferenceChangeListener(preferenceListener);
+			} catch (Exception e) {
+				Log.w(TAG, "Failed to unregister preference listener", e);
+			}
+			preferenceListener = null;
+		}
+
+		// Снимаем broadcast receiver масштаба
+		if (scaleReceiver != null) {
+			try {
+				unregisterReceiver(scaleReceiver);
+			} catch (IllegalArgumentException e) {
+				Log.w(TAG, "scaleReceiver already unregistered", e);
+			}
+			scaleReceiver = null;
+		}
+
+		// Снимаем broadcast receiver позиции
+		if (positionReceiver != null) {
+			try {
+				unregisterReceiver(positionReceiver);
+			} catch (IllegalArgumentException e) {
+				Log.w(TAG, "positionReceiver already unregistered", e);
+			}
+			positionReceiver = null;
+		}
+
 		super.onDestroy();
 	}
 
@@ -235,7 +275,7 @@ public class FloatingOverlayService extends Service {
 	}
 
 	/**
-	 * Пытаемся прикрепить overlay к WindowManager. Метод безопасно выходить, если уже прикреплены
+	 * Пытаемся прикрепить overlay к WindowManager. Метод безопасно выходит, если уже прикреплены
 	 * либо нет разрешения. Все операции оборачиваем в try/catch — WindowManager бросает исключения
 	 * при изменении конфигурации/разрешений.
 	 */
@@ -261,37 +301,31 @@ public class FloatingOverlayService extends Service {
 			}
 			overlayCrossfadeView = null;
 			overlayAnimator = null;
-		overlayParams = buildDefaultLayoutParams();
-		windowManager.addView(overlayView, overlayParams);
-		overlayAttached.set(true);
 
-		// КРИТИЧНО: перечитываем актуальное значение разрешения ПРЯМО СЕЙЧАС
-		android.content.SharedPreferences currentPrefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-		boolean currentAllow = currentPrefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-		float actualAlpha = currentAllow ? 0.7f : 1.0f;
-		pendingInitialAlpha = actualAlpha;
-		
-		Log.e(TAG, "▓▓▓ OVERLAY ATTACHED: actualAllow=" + currentAllow + " -> alpha=" + actualAlpha + " ▓▓▓");
-		setOverlayAlpha(actualAlpha);			// --- ИНИЦИАЛИЗАЦИЯ СТАРТОВОГО СОСТОЯНИЯ ---
-			// При активном режиме редактирования обычные внешние обновления состояния блокируются.
-			// Однако при самом первом появлении overlay нам нужно что-то отрисовать (зелёный/1),
-			// иначе пользователь увидит пустую прозрачную полоску. Поэтому:
-			// 1. Проверяем есть ли уже глобально установленное состояние (StateBus.getCurrentState()).
-			// 2. Если нет (0 или <0) — публикуем зелёный (1) через StateBus.publishStripState(1).
-			// 3. Независимо от режима редактирования выполняем одноразовый прямой вызов updateOverlayState(existing)
-			//    — stripStateListener пропустит первое обновление (currentState==0) и блокировку не наложит.
+			overlayParams = buildDefaultLayoutParams();
+			windowManager.addView(overlayView, overlayParams);
+			overlayAttached.set(true);
+
+			// КРИТИЧНО: перечитываем актуальное значение разрешения ПРЯМО СЕЙЧАС
+			android.content.SharedPreferences currentPrefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
+			boolean currentAllow = currentPrefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
+			float actualAlpha = currentAllow ? ALPHA_EDIT_MODE : ALPHA_NORMAL;
+
+			Log.e(TAG, "▓▓▓ OVERLAY ATTACHED: actualAllow=" + currentAllow + " -> alpha=" + actualAlpha + " ▓▓▓");
+			setOverlayAlpha(actualAlpha);
+
+			// --- ИНИЦИАЛИЗАЦИЯ СТАРТОВОГО СОСТОЯНИЯ ---
 			int existing = StateBus.getCurrentState();
 			if (existing <= 0) {
 				StateBus.publishStripState(1); // фиксируем зелёный глобально и для других компонентов
 				existing = 1;
 			}
 			updateOverlayState(existing);
-			
+
 			// Применяем скругления с текущим масштабом
-			android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-			float currentScale = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
+			float currentScale = currentPrefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
 			updateCornerRadius(currentScale);
-			
+
 			Log.i(TAG, "Overlay attached");
 
 			setupOverlayInteractions();
@@ -320,8 +354,8 @@ public class FloatingOverlayService extends Service {
 	}
 
 	/**
-	 * Обрабатывает касания по полосе и переводит их в условные зоны (1..5). Метод сейчас не
-	 * используется, но хранится как готовая реализация для будущих итераций.
+	 * Обрабатывает касания по полосе и переводит их в условные зоны (1..5).
+	 * Сейчас используется только при отключённом режиме редактирования.
 	 */
 	private boolean handleStripTouch(MotionEvent event) {
 		if (event == null || overlayStateStrip == null) {
@@ -338,7 +372,7 @@ public class FloatingOverlayService extends Service {
 		float y = event.getY();
 		int zone = (int) (y / (height / 5f)) + 1;
 		if (zone < 1) zone = 1; else if (zone > 5) zone = 5;
-		// Перед сменой состояния всегда проверяем флаг
+
 		android.content.SharedPreferences p = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
 		boolean allowModification = p.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
 		if (allowModification) {
@@ -362,18 +396,15 @@ public class FloatingOverlayService extends Service {
 			return false;
 		}
 
-		// Проверяем, разрешено ли изменение окна
 		android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
 		boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-		
+
 		if (!allowModification) {
 			if (event.getAction() == MotionEvent.ACTION_UP) {
 				return handleStripTouch(event);
 			}
 			return true;
 		} else {
-			// В режиме редактирования не вызываем смену состояния, но НЕ прерываем поток событий,
-			// чтобы дошли до ACTION_UP и сохранили позицию/масштаб.
 			if (event.getAction() == MotionEvent.ACTION_UP) {
 				Log.d(TAG, "State change blocked in edit mode (tap ignored) — allowing gesture finalization");
 			}
@@ -385,9 +416,8 @@ public class FloatingOverlayService extends Service {
 		switch (action) {
 			case MotionEvent.ACTION_DOWN:
 				if (suppressMoveUntilUp && gestureMode == GestureMode.NONE) {
-					Log.d(TAG, "ACTION_DOWN ignored (suppressMoveUntilUp still true) — waiting for full release previously? Resetting now");
+					Log.d(TAG, "ACTION_DOWN ignored (suppressMoveUntilUp still true) — resetting now");
 				}
-				// Если предыдущий жест pinch завершён (нет второго пальца и от прошлого ACTION_UP мы уже сбросили), гарантийно снимаем блокировку
 				if (suppressMoveUntilUp) {
 					Log.d(TAG, "Clearing suppressMoveUntilUp on new ACTION_DOWN");
 					suppressMoveUntilUp = false;
@@ -398,8 +428,7 @@ public class FloatingOverlayService extends Service {
 				initialY = overlayParams.y;
 				gestureMode = GestureMode.MOVE;
 				isScaling = false;
-				didMoveDuringGesture = false; // reset
-				// suppressMoveUntilUp уже очищён выше, если был
+				didMoveDuringGesture = false;
 				return true;
 
 			case MotionEvent.ACTION_POINTER_DOWN:
@@ -408,7 +437,7 @@ public class FloatingOverlayService extends Service {
 					if (moved < dpToPx(6)) {
 						gestureMode = GestureMode.SCALE;
 						isScaling = true;
-						suppressMoveUntilUp = true; // включаем блокировку последующих одиночных перемещений до полного отпускания
+						suppressMoveUntilUp = true;
 						initialDistance = getDistance(event);
 						initialScale = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
 						lastDistanceDuringScale = initialDistance;
@@ -449,10 +478,8 @@ public class FloatingOverlayService extends Service {
 							lastDistanceDuringScale = currentDistance;
 							return true;
 						}
-						int baseWidth = 100;
-						int baseHeight = 430;
-						int newWidth = Math.round(baseWidth * smoothedScale);
-						int newHeight = Math.round(baseHeight * smoothedScale);
+						int newWidth = Math.round(BASE_WIDTH_PX * smoothedScale);
+						int newHeight = Math.round(BASE_HEIGHT_PX * smoothedScale);
 						float pivotRelativeX = scalePivotX - initialX;
 						float pivotRelativeY = scalePivotY - initialY;
 						float pivotRatioX = pivotRelativeX / initialWidth;
@@ -472,7 +499,11 @@ public class FloatingOverlayService extends Service {
 					}
 					overlayParams.x = newX;
 					overlayParams.y = newY;
-					try { windowManager.updateViewLayout(overlayView, overlayParams); } catch (Exception e) { Log.e(TAG, "Failed to update overlay position", e); }
+					try {
+						windowManager.updateViewLayout(overlayView, overlayParams);
+					} catch (Exception e) {
+						Log.e(TAG, "Failed to update overlay position", e);
+					}
 				}
 				return true;
 
@@ -480,19 +511,23 @@ public class FloatingOverlayService extends Service {
 				if (gestureMode == GestureMode.SCALE) {
 					isScaling = false;
 					saveOverlayScale();
-					if (animationPausedForScaling) { resumeAnimation(); animationPausedForScaling = false; }
+					if (animationPausedForScaling) {
+						resumeAnimation();
+						animationPausedForScaling = false;
+					}
 					gestureMode = GestureMode.NONE;
 				}
-				// Если остался один палец, ещё не снимаем блокировку (будет снята на финальный ACTION_UP)
 				return true;
 
 			case MotionEvent.ACTION_UP:
 				if (gestureMode == GestureMode.SCALE) {
 					isScaling = false;
 					saveOverlayScale();
-					if (animationPausedForScaling) { resumeAnimation(); animationPausedForScaling = false; }
+					if (animationPausedForScaling) {
+						resumeAnimation();
+						animationPausedForScaling = false;
+					}
 				} else if (gestureMode == GestureMode.MOVE) {
-					// Всегда проверяем сохранённые префы и фактическую позицию — если отличаются, сохраняем.
 					android.content.SharedPreferences p = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
 					int storedX = eliminateTinyOffset(p.getInt(AppState.KEY_OVERLAY_X, overlayParams.x));
 					int storedY = p.getInt(AppState.KEY_OVERLAY_Y, overlayParams.y);
@@ -509,7 +544,7 @@ public class FloatingOverlayService extends Service {
 					if (suppressMoveUntilUp) {
 						Log.d(TAG, "All fingers up — clearing suppressMoveUntilUp");
 					}
-					suppressMoveUntilUp = false; // полностью освободили экран
+					suppressMoveUntilUp = false;
 				}
 				return true;
 
@@ -535,73 +570,60 @@ public class FloatingOverlayService extends Service {
 		return (float) Math.sqrt(x * x + y * y);
 	}
 
-    /**
-     * Применяет новый масштаб к overlay окну
-     */
-    private void applyScale(float newScale) {
-        if (overlayParams == null || windowManager == null || overlayView == null) {
-            return;
-        }
+	/**
+	 * Применяет новый масштаб к overlay окну
+	 */
+	private void applyScale(float newScale) {
+		if (overlayParams == null || windowManager == null || overlayView == null) {
+			return;
+		}
 
-        // КРИТИЧЕСКИ ВАЖНО: сохраняем текущую позицию ПЕРЕД изменением размера
-        int savedX = overlayParams.x;
-        int savedY = overlayParams.y;
+		int savedX = overlayParams.x;
+		int savedY = overlayParams.y;
 
-        // Базовые размеры
-        int baseWidth = 100;
-        int baseHeight = 430;
+		int newWidth = Math.round(BASE_WIDTH_PX * newScale);
+		int newHeight = Math.round(BASE_HEIGHT_PX * newScale);
 
-        // Вычисляем новые размеры
-        int newWidth = Math.round(baseWidth * newScale);
-        int newHeight = Math.round(baseHeight * newScale);
+		overlayParams.width = newWidth;
+		overlayParams.height = newHeight;
+		overlayParams.x = savedX;
+		overlayParams.y = savedY;
 
-        overlayParams.width = newWidth;
-        overlayParams.height = newHeight;
-        
-        // КРИТИЧЕСКИ ВАЖНО: восстанавливаем сохранённую позицию
-        overlayParams.x = savedX;
-        overlayParams.y = savedY;
+		updateCornerRadius(newScale);
 
-        // Обновляем радиус скругления пропорционально масштабу
-        updateCornerRadius(newScale);
+		try {
+			windowManager.updateViewLayout(overlayView, overlayParams);
+		} catch (Exception e) {
+			Log.e(TAG, "Failed to apply scale", e);
+		}
+	}
 
-        try {
-            windowManager.updateViewLayout(overlayView, overlayParams);
-            // НЕ трогаем alpha — она управляется только preference listener!
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to apply scale", e);
-        }
-    }    /**
-     * Применяет новый масштаб и позицию к overlay окну одновременно
-     */
-    private void applyScaleWithPosition(float newScale, int newX, int newY) {
-        if (overlayParams == null || windowManager == null) {
-            return;
-        }
+	/**
+	 * Применяет новый масштаб и позицию к overlay окну одновременно
+	 */
+	private void applyScaleWithPosition(float newScale, int newX, int newY) {
+		if (overlayParams == null || windowManager == null) {
+			return;
+		}
 
-        // Базовые размеры
-        int baseWidth = 100;
-        int baseHeight = 430;
+		int newWidth = Math.round(BASE_WIDTH_PX * newScale);
+		int newHeight = Math.round(BASE_HEIGHT_PX * newScale);
 
-        // Вычисляем новые размеры
-        int newWidth = Math.round(baseWidth * newScale);
-        int newHeight = Math.round(baseHeight * newScale);
+		overlayParams.width = newWidth;
+		overlayParams.height = newHeight;
+		overlayParams.x = newX;
+		overlayParams.y = newY;
 
-        overlayParams.width = newWidth;
-        overlayParams.height = newHeight;
-        overlayParams.x = newX;
-        overlayParams.y = newY;
+		updateCornerRadius(newScale);
 
-        // Обновляем радиус скругления пропорционально масштабу
-        updateCornerRadius(newScale);
+		try {
+			windowManager.updateViewLayout(overlayView, overlayParams);
+		} catch (Exception e) {
+			Log.e(TAG, "Failed to apply scale with position", e);
+		}
+	}
 
-        try {
-            windowManager.updateViewLayout(overlayView, overlayParams);
-            // НЕ трогаем alpha — она управляется только preference listener!
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to apply scale with position", e);
-        }
-    }	/**
+	/**
 	 * Обновляет радиус скругления углов overlay окна пропорционально масштабу.
 	 * Базовый радиус - 6dp, увеличивается/уменьшается с масштабом.
 	 */
@@ -610,17 +632,13 @@ public class FloatingOverlayService extends Service {
 			return;
 		}
 
-		// Базовый радиус скругления в пикселях (6dp)
 		float baseRadiusDp = 6f;
 		float density = getResources().getDisplayMetrics().density;
 		float baseRadiusPx = baseRadiusDp * density;
-
-		// Вычисляем новый радиус пропорционально масштабу
 		float newRadiusPx = baseRadiusPx * scale;
 
-		// Создаём новый drawable с обновлённым радиусом
 		android.graphics.drawable.GradientDrawable background = new android.graphics.drawable.GradientDrawable();
-		background.setColor(0xFF121212); // Тёмно-серый цвет фона
+		background.setColor(0xFF121212);
 		background.setCornerRadius(newRadiusPx);
 
 		overlayRoot.setBackground(background);
@@ -637,30 +655,21 @@ public class FloatingOverlayService extends Service {
 			return;
 		}
 
-		// Вычисляем масштаб из текущих размеров с правильной базовой шириной
-		int baseWidth = 100;
-		float currentScale = (float) overlayParams.width / baseWidth;
-		
-		// Округляем до 2 знаков после запятой для точности
+		float currentScale = (float) overlayParams.width / BASE_WIDTH_PX;
 		currentScale = Math.round(currentScale * 100f) / 100f;
-		
+
 		android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
 		prefs.edit()
 				.putFloat(AppState.KEY_OVERLAY_SCALE, currentScale)
 				.apply();
 
 		Log.d(TAG, "Overlay scale saved: " + currentScale + " (width=" + overlayParams.width + ")");
-		
-		// Отправляем broadcast для обновления UI в реальном времени
+
 		android.content.Intent intent = new android.content.Intent(AppState.ACTION_OVERLAY_UPDATED);
 		intent.putExtra(AppState.KEY_OVERLAY_SCALE, currentScale);
 		sendBroadcast(intent);
 	}
 
-	/**
-	 * Сохраняет текущую позицию overlay окна в SharedPreferences.
-	 * Размеры не сохраняются, так как вычисляются из scale.
-	 */
 	/**
 	 * Устанавливает прозрачность overlay окна
 	 */
@@ -672,31 +681,33 @@ public class FloatingOverlayService extends Service {
 		Log.d(TAG, "Overlay alpha set to: " + alpha);
 	}
 
+	/**
+	 * Сохраняет текущую позицию overlay окна в SharedPreferences.
+	 * Размеры не сохраняются, так как вычисляются из scale.
+	 */
 	private void saveOverlayPosition() {
 		if (overlayParams == null) {
 			return;
 		}
 
 		android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-	int logicalX = overlayParams.x;
-	// Если применяли компенсацию (x отрицательный но близок к 0), вернём в префы 0.
-	if (logicalX < 0 && Math.abs(logicalX) <= computeLeftCompensation() + 2) {
-		logicalX = 0;
-	}
-	int clampedX = eliminateTinyOffset(logicalX);
+		int logicalX = overlayParams.x;
+		if (logicalX < 0 && Math.abs(logicalX) <= computeLeftCompensation() + 2) {
+			logicalX = 0;
+		}
+		int clampedX = eliminateTinyOffset(logicalX);
 
-	prefs.edit()
-		.putInt(AppState.KEY_OVERLAY_X, clampedX)
+		prefs.edit()
+				.putInt(AppState.KEY_OVERLAY_X, clampedX)
 				.putInt(AppState.KEY_OVERLAY_Y, overlayParams.y)
 				.apply();
 
-	Log.d(TAG, "Overlay position saved: x=" + clampedX + " y=" + overlayParams.y);
-	
-	// Отправляем broadcast для обновления UI в реальном времени
-	android.content.Intent intent = new android.content.Intent(AppState.ACTION_OVERLAY_UPDATED);
-	intent.putExtra(AppState.KEY_OVERLAY_X, clampedX);
-	intent.putExtra(AppState.KEY_OVERLAY_Y, overlayParams.y);
-	sendBroadcast(intent);
+		Log.d(TAG, "Overlay position saved: x=" + clampedX + " y=" + overlayParams.y);
+
+		android.content.Intent intent = new android.content.Intent(AppState.ACTION_OVERLAY_UPDATED);
+		intent.putExtra(AppState.KEY_OVERLAY_X, clampedX);
+		intent.putExtra(AppState.KEY_OVERLAY_Y, overlayParams.y);
+		sendBroadcast(intent);
 	}
 
 	private void refreshOverlayStatus() {
@@ -729,11 +740,11 @@ public class FloatingOverlayService extends Service {
 		overlayAttached.set(false);
 		overlayView = null;
 		overlayParams = null;
-        overlayRoot = null;
+		overlayRoot = null;
 		overlayStateStrip = null;
-        overlayCrossfadeView = null;
+		overlayCrossfadeView = null;
 		currentState = 0;
-        lastResId = 0;
+		lastResId = 0;
 	}
 
 	/**
@@ -766,39 +777,32 @@ public class FloatingOverlayService extends Service {
 	}
 
 	/**
-	 * Формирует параметры расположения overlay: в правом нижнем углу с фиксированным отступом и без
-	 * возможности взаимодействия (FLAG_NOT_TOUCHABLE). При необходимости позицию можно скорректировать.
+	 * Формирует параметры расположения overlay.
+	 * Позиция и масштаб восстанавливаются из SharedPreferences.
 	 */
 	private WindowManager.LayoutParams buildDefaultLayoutParams() {
 		int layoutType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
 				? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
 				: WindowManager.LayoutParams.TYPE_PHONE;
 
-		// Загружаем сохранённые параметры
 		android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-		int defaultX = 0;  // РЕАЛЬНЫЙ 0!
-		int defaultY = 0;  // РЕАЛЬНЫЙ 0!
+		int defaultX = 0;
+		int defaultY = 0;
 		float defaultScale = 1.0f;
-		
-		// Базовые размеры в пикселях (соотношение 476×2047)
-		int baseWidth = 100;
-		int baseHeight = 430;
-		
-	int savedX = eliminateTinyOffset(prefs.getInt(AppState.KEY_OVERLAY_X, defaultX));
-	int savedY = prefs.getInt(AppState.KEY_OVERLAY_Y, defaultY);
+
+		int savedX = eliminateTinyOffset(prefs.getInt(AppState.KEY_OVERLAY_X, defaultX));
+		int savedY = prefs.getInt(AppState.KEY_OVERLAY_Y, defaultY);
 		float savedScale = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, defaultScale);
 
-		// Вычисляем финальные размеры с учётом масштаба
-		int finalWidth = Math.round(baseWidth * savedScale);
-		int finalHeight = Math.round(baseHeight * savedScale);
+		int finalWidth = Math.round(BASE_WIDTH_PX * savedScale);
+		int finalHeight = Math.round(BASE_HEIGHT_PX * savedScale);
 
-		Log.i(TAG, "Loading overlay params: X=" + savedX + " Y=" + savedY + 
+		Log.i(TAG, "Loading overlay params: X=" + savedX + " Y=" + savedY +
 				" Scale=" + savedScale + " (W=" + finalWidth + " H=" + finalHeight + ")");
 
-		// Если это первый запуск (значения не сохранены), сохраняем значения по умолчанию
 		if (!prefs.contains(AppState.KEY_OVERLAY_X)) {
-	    prefs.edit()
-		    .putInt(AppState.KEY_OVERLAY_X, defaultX)
+			prefs.edit()
+					.putInt(AppState.KEY_OVERLAY_X, defaultX)
 					.putInt(AppState.KEY_OVERLAY_Y, defaultY)
 					.putFloat(AppState.KEY_OVERLAY_SCALE, defaultScale)
 					.apply();
@@ -811,16 +815,12 @@ public class FloatingOverlayService extends Service {
 				finalHeight,
 				layoutType,
 				WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-					| WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-					| WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+						| WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+						| WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
 				PixelFormat.TRANSLUCENT
 		);
-		// Используем LEFT вместо START для корректной работы координаты X
-		// X: отрицательные значения = влево за границу экрана, положительные = вправо
-		// Y: отрицательные значения = вверх за границу экрана, положительные = вниз
 		params.gravity = Gravity.LEFT | Gravity.TOP;
-		// Компенсация визуального смещения: если сохранён X == 0, вычисляем фактическую левую границу
-		// через raw ширину экрана. Иногда WindowManager считает origin чуть правее (gesture inset / cutout).
+
 		if (savedX == 0) {
 			int compensation = computeLeftCompensation();
 			params.x = -compensation;
@@ -843,12 +843,9 @@ public class FloatingOverlayService extends Service {
 	}
 
 	/**
-	 * Пытаемся оценить системный левый inset (жестовая зона/скошенный край). Если View при x=0
-	 * визуально стоит со смещением ~10px, возвращаем среднее значение 10. В будущем можно заменить
-	 * на WindowInsets (API 30+), но для простоты сейчас используем эвристику.
+	 * Пытаемся оценить системный левый inset (жестовая зона/скошенный край).
 	 */
 	private int computeLeftCompensation() {
-		// Можно усложнить через WindowMetrics (API 30), но пока фикс.
 		return 10; // px
 	}
 
@@ -860,8 +857,7 @@ public class FloatingOverlayService extends Service {
 	}
 
 	/**
-	 * Создаёт/пересоздаёт канал уведомлений с минимальной важностью. При повышении важности пользователь
-	 * мог бы получить лишние уведомления, поэтому принудительно очищаем канал при неправильных настройках.
+	 * Создаёт/пересоздаёт канал уведомлений с минимальной важностью.
 	 */
 	private void ensureChannel() {
 		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
@@ -880,9 +876,9 @@ public class FloatingOverlayService extends Service {
 		}
 		if (needCreate) {
 			channel = new NotificationChannel(
-				CHANNEL_ID,
-				"Overlay probe",
-				NotificationManager.IMPORTANCE_MIN
+					CHANNEL_ID,
+					"Overlay probe",
+					NotificationManager.IMPORTANCE_MIN
 			);
 			channel.enableLights(false);
 			channel.enableVibration(false);
@@ -895,8 +891,7 @@ public class FloatingOverlayService extends Service {
 	}
 
 	/**
-	 * Обновляет изображение полосы. Если состояние изменилось плавно — запускаем анимацию crossfade,
-	 * иначе просто подменяем drawable.
+	 * Обновляет изображение полосы.
 	 */
 	private void updateOverlayState(int state) {
 		if (overlayStateStrip == null) {
@@ -931,8 +926,7 @@ public class FloatingOverlayService extends Service {
 	}
 
 	/**
-	 * Плавно перетягивает изображение полосы с помощью дополнительного ImageView поверх основного.
-	 * Анимация работает по ease-in-out кривой, чтобы сделать переход мягким.
+	 * Плавно переключает изображение полосы с помощью дополнительного ImageView.
 	 */
 	private void startStripCrossfade(Drawable newDrawable) {
 		cancelOverlayAnimator();

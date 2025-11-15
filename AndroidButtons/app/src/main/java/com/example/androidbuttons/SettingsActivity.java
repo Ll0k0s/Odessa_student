@@ -14,11 +14,7 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import com.example.androidbuttons.databinding.ActivitySettingsBinding;
 
-/**
- * Экран настроек: позволяет выбрать IP/порт TCP сервера и локомотив.
- * Также отображает живой лог и индикаторы подключения. Комментарии ниже поясняют тонкости
- * управления полями и межпоточных взаимодействий.
- */
+// Экран настроек: IP/порт TCP, выбор локомотива, параметры overlay и лог
 public class SettingsActivity extends AppCompatActivity {
     private ActivitySettingsBinding binding;
     private final java.util.Timer timer = new java.util.Timer("settings-console", true);
@@ -26,6 +22,9 @@ public class SettingsActivity extends AppCompatActivity {
     private final java.util.Timer statusTimer = new java.util.Timer("settings-status", true);
     private android.content.SharedPreferences prefs;
 
+    private static final int CONSOLE_MAX_CHARS = 20000; // ограничение размера консоли
+
+    // Временные значения полей (до записи в prefs)
     private String pendingHost;
     private String pendingPort;
     private String pendingOverlayX;
@@ -33,28 +32,30 @@ public class SettingsActivity extends AppCompatActivity {
     private String pendingOverlayScale;
     private boolean pendingDirty = false;
     private boolean suppressWatchers = false;
+
+    // Отслеживание состояния клавиатуры
     private boolean keyboardVisible = false;
     private ViewTreeObserver.OnGlobalLayoutListener keyboardListener;
+
+    // Приём обновлений позиции/масштаба overlay
     private android.content.BroadcastReceiver overlayUpdateReceiver;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-    binding = ActivitySettingsBinding.inflate(getLayoutInflater());
+        binding = ActivitySettingsBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-
-        // Консоль делаем прокручиваемой
+        // Делаем лог прокручиваемым
         binding.textConsole.setMovementMethod(new ScrollingMovementMethod());
 
-        // Инициализируем поля из SharedPreferences
+        // Получаем SharedPreferences
         prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
+
+        // Загружаем стартовые значения в поля
         refreshValuesFromPreferences();
 
-        // Сохраняем изменения полей только после скрытия клавиатуры
-        // Для каждого текстового поля используем текстовые вотчеры, которые просто помечают
-        // изменённые значения. Фактическая запись в SharedPreferences откладывается до момента,
-        // когда пользователь покидает поле (скрывается клавиатура) или экран.
+        // Отслеживаем изменения IP (пока только помечаем как pending)
         binding.valueAddrTCP.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
@@ -64,6 +65,8 @@ public class SettingsActivity extends AppCompatActivity {
                 pendingDirty = true;
             }
         });
+
+        // Отслеживаем изменения порта
         binding.valuePortTCP.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
@@ -74,7 +77,7 @@ public class SettingsActivity extends AppCompatActivity {
             }
         });
 
-        // Overlay X coordinate
+        // X координата overlay (редактирование + немедленное применение)
         binding.valueOverlayX.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
@@ -82,13 +85,13 @@ public class SettingsActivity extends AppCompatActivity {
                 if (suppressWatchers) return;
                 pendingOverlayX = String.valueOf(s);
                 pendingDirty = true;
-                
-                // Применяем координату X немедленно
+
                 Integer xValue = parseIntSafe(pendingOverlayX, -10000, 10000);
                 if (xValue != null) {
                     xValue = eliminateTinyOffset(xValue);
                     prefs.edit().putInt(AppState.KEY_OVERLAY_X, xValue).apply();
-                    // Отправляем broadcast для немедленного применения
+
+                    // Шлём broadcast для мгновенного применения координаты X
                     android.content.Intent intent = new android.content.Intent("com.example.androidbuttons.APPLY_POSITION_NOW");
                     intent.putExtra("x", xValue);
                     sendBroadcast(intent);
@@ -96,7 +99,7 @@ public class SettingsActivity extends AppCompatActivity {
             }
         });
 
-        // Overlay Y coordinate
+        // Y координата overlay (редактирование + немедленное применение)
         binding.valueOverlayY.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
@@ -104,12 +107,12 @@ public class SettingsActivity extends AppCompatActivity {
                 if (suppressWatchers) return;
                 pendingOverlayY = String.valueOf(s);
                 pendingDirty = true;
-                
-                // Применяем координату Y немедленно
+
                 Integer yValue = parseIntSafe(pendingOverlayY, -10000, 10000);
                 if (yValue != null) {
                     prefs.edit().putInt(AppState.KEY_OVERLAY_Y, yValue).apply();
-                    // Отправляем broadcast для немедленного применения
+
+                    // Шлём broadcast для мгновенного применения координаты Y
                     android.content.Intent intent = new android.content.Intent("com.example.androidbuttons.APPLY_POSITION_NOW");
                     intent.putExtra("y", yValue);
                     sendBroadcast(intent);
@@ -117,18 +120,22 @@ public class SettingsActivity extends AppCompatActivity {
             }
         });
 
-        // SeekBar для overlay scale
+        // Ползунок масштаба overlay
         binding.seekbarOverlayScale.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(android.widget.SeekBar seekBar, int progress, boolean fromUser) {
+                // Переводим позицию слайдера в масштаб
                 float scale = 0.1f + (progress * 0.05f);
                 binding.textScaleValue.setText(String.format(java.util.Locale.US, "%.2f", scale));
+
                 if (fromUser) {
                     pendingOverlayScale = String.valueOf(scale);
                     pendingDirty = true;
-                    // Применяем масштаб в реальном времени через broadcast
+
+                    // Сохраняем масштаб в prefs
                     prefs.edit().putFloat(AppState.KEY_OVERLAY_SCALE, scale).apply();
-                    // Отправляем broadcast для немедленного применения масштаба
+
+                    // Шлём broadcast, чтобы сразу изменить размер overlay
                     android.content.Intent intent = new android.content.Intent("com.example.androidbuttons.APPLY_SCALE_NOW");
                     intent.putExtra("scale", scale);
                     sendBroadcast(intent);
@@ -136,21 +143,15 @@ public class SettingsActivity extends AppCompatActivity {
                 }
             }
 
-            @Override
-            public void onStartTrackingTouch(android.widget.SeekBar seekBar) {
-                // Ничего не делаем
-            }
-
-            @Override
-            public void onStopTrackingTouch(android.widget.SeekBar seekBar) {
-                // Масштаб уже применяется в реальном времени через onProgressChanged
-                // Перезапуск сервиса НЕ нужен, т.к. broadcast уже отправлен
-            }
+            @Override public void onStartTrackingTouch(android.widget.SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(android.widget.SeekBar seekBar) {}
         });
 
-        // Наполняем spinner значениями Loco1..Loco8
+        // Формируем список Loco1..Loco8 для спиннера
         String[] locoItems = new String[8];
         for (int i = 0; i < 8; i++) locoItems[i] = "Loco" + (i + 1);
+
+        // Настраиваем адаптер спиннера
         ArrayAdapter<String> locoAdapter = new ArrayAdapter<>(
                 this,
                 android.R.layout.simple_spinner_item,
@@ -158,61 +159,67 @@ public class SettingsActivity extends AppCompatActivity {
         );
         locoAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         binding.spinnerNum.setAdapter(locoAdapter);
+
+        // Выставляем текущий локомотив из AppState
         binding.spinnerNum.setSelection(Math.max(0, AppState.selectedLoco.get() - 1));
-        // При выборе нового локомотива сразу обновляем глобальное состояние. Это решение мгновенно
-        // влияет на MainActivity, которая читает AppState.selectedLoco при отправке команд.
+
+        // Сохраняем выбранный локомотив в AppState
         binding.spinnerNum.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+            @Override
+            public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 AppState.selectedLoco.set(position + 1);
             }
-            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { /* keep prev */ }
+
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
         });
 
-        // Переключатель разрешения изменения overlay окна
+        // Обработка переключателя "Разрешить изменение окна"
         binding.switchAllowOverlayModification.setOnCheckedChangeListener((buttonView, isChecked) -> {
             android.util.Log.e("SettingsActivity", "═══════ SWITCH CLICKED: isChecked=" + isChecked + " ═══════");
-            
+
+            // Сохраняем флаг в prefs синхронно
             prefs.edit()
                     .putBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, isChecked)
-                    .commit(); // ИЗМЕНЕНО НА COMMIT для гарантии немедленного сохранения!
-            
-            // ПРОВЕРЯЕМ что сохранилось
+                    .commit();
+
             boolean saved = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
             android.util.Log.e("SettingsActivity", "═══════ SAVED VALUE: " + saved + " ═══════");
-            
+
             String status = isChecked ? "разрешено" : "запрещено";
             android.widget.Toast.makeText(this, "Изменение окна " + status, android.widget.Toast.LENGTH_SHORT).show();
 
-            // Включаем / отключаем элементы управления сразу
+            // Включаем/выключаем элементы редактирования overlay
             applyEditModeEnabled(isChecked);
 
-			// При включении режима редактирования — выставляем зелёный (1) по умолчанию
-			if (isChecked) {
-				StateBus.publishStripState(1);
-			}
+            // При включении редактирования выставляем зелёное состояние (1)
+            if (isChecked) {
+                StateBus.publishStripState(1);
+            }
         });
 
-        // Загружаем состояние переключателя
+        // Восстанавливаем флаг редактирования overlay
         binding.switchAllowOverlayModification.setChecked(
                 prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true)
         );
-    // Применяем состояние edit-mode к контролам
-    applyEditModeEnabled(binding.switchAllowOverlayModification.isChecked());
 
-    // Слушатель внешних изменений (если флаг изменён из другого места)
-    prefs.registerOnSharedPreferenceChangeListener((sharedPreferences, key) -> {
-        if (AppState.KEY_OVERLAY_ALLOW_MODIFICATION.equals(key)) {
-            boolean allow = sharedPreferences.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-            if (binding.switchAllowOverlayModification.isChecked() != allow) {
-                binding.switchAllowOverlayModification.setChecked(allow);
+        // Сразу применяем состояние edit-mode к полям
+        applyEditModeEnabled(binding.switchAllowOverlayModification.isChecked());
+
+        // Следим за внешними изменениями флага редактирования (например из сервиса)
+        prefs.registerOnSharedPreferenceChangeListener((sharedPreferences, key) -> {
+            if (AppState.KEY_OVERLAY_ALLOW_MODIFICATION.equals(key)) {
+                boolean allow = sharedPreferences.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
+                if (binding.switchAllowOverlayModification.isChecked() != allow) {
+                    binding.switchAllowOverlayModification.setChecked(allow);
+                }
+                applyEditModeEnabled(allow);
             }
-            applyEditModeEnabled(allow);
-        }
-    });
+        });
 
-        // Периодически сливаем очередь лога в text_console
+        // Периодическая выгрузка лога из общей очереди в textConsole
         timer.scheduleAtFixedRate(new java.util.TimerTask() {
-            @Override public void run() {
+            @Override
+            public void run() {
                 StringBuilder sb = new StringBuilder();
                 while (!AppState.consoleQueue.isEmpty()) {
                     String s = AppState.consoleQueue.poll();
@@ -226,41 +233,48 @@ public class SettingsActivity extends AppCompatActivity {
             }
         }, 200, 200);
 
-        // Обновление индикаторов статуса TCP
-        // Индикаторы подключения обновляем каждые 100мс для быстрого отклика на разрыв соединения
+        // Периодическое обновление индикаторов TCP
         statusTimer.scheduleAtFixedRate(new java.util.TimerTask() {
-            @Override public void run() {
+            @Override
+            public void run() {
                 runOnUiThread(() -> {
                     boolean wasReachable = binding.switchTCPIndicator.isChecked();
                     boolean isReachable = AppState.tcpReachable;
 
-                    // Обновляем индикатор
+                    // Обновляем индикатор "TCP доступен"
                     binding.switchTCPIndicator.setChecked(isReachable);
-                    binding.progressBarTCPIndicator.setVisibility(AppState.tcpConnecting ? View.VISIBLE : View.GONE);
-                    
-                    // Логируем изменение статуса
+
+                    // Показываем прогресс, если идёт подключение
+                    binding.progressBarTCPIndicator.setVisibility(
+                            AppState.tcpConnecting ? View.VISIBLE : View.GONE
+                    );
+
                     if (wasReachable != isReachable) {
-                        android.util.Log.d("SettingsActivity", "TCP reachability changed: " + wasReachable + " -> " + isReachable + 
-                                " (connecting=" + AppState.tcpConnecting + ")");
+                        android.util.Log.d(
+                                "SettingsActivity",
+                                "TCP reachability changed: " + wasReachable + " -> " + isReachable +
+                                        " (connecting=" + AppState.tcpConnecting + ")"
+                        );
                     }
                 });
             }
         }, 0, 100);
 
+        // Отслеживаем появление/скрытие клавиатуры
         setupKeyboardListener();
+
+        // Принимаем broadcast'ы об изменении позиции и масштаба overlay
         setupOverlayUpdateReceiver();
     }
 
-    /**
-     * Настраивает BroadcastReceiver для получения обновлений позиции и масштаба overlay окна
-     * в реальном времени при изменении через жесты.
-     */
+    // Регистрируем приёмник обновлений overlay (координаты и масштаб)
     private void setupOverlayUpdateReceiver() {
         overlayUpdateReceiver = new android.content.BroadcastReceiver() {
             @Override
             public void onReceive(android.content.Context context, android.content.Intent intent) {
                 if (AppState.ACTION_OVERLAY_UPDATED.equals(intent.getAction())) {
-                    // Обновляем поля координат, если они были переданы
+
+                    // Обновляем X, если пришёл в интенте
                     if (intent.hasExtra(AppState.KEY_OVERLAY_X)) {
                         int x = intent.getIntExtra(AppState.KEY_OVERLAY_X, 0);
                         pendingOverlayX = String.valueOf(x);
@@ -269,7 +283,8 @@ public class SettingsActivity extends AppCompatActivity {
                         suppressWatchers = false;
                         android.util.Log.d("SettingsActivity", "Overlay X updated from broadcast: " + x);
                     }
-                    
+
+                    // Обновляем Y, если пришёл в интенте
                     if (intent.hasExtra(AppState.KEY_OVERLAY_Y)) {
                         int y = intent.getIntExtra(AppState.KEY_OVERLAY_Y, 0);
                         pendingOverlayY = String.valueOf(y);
@@ -278,8 +293,8 @@ public class SettingsActivity extends AppCompatActivity {
                         suppressWatchers = false;
                         android.util.Log.d("SettingsActivity", "Overlay Y updated from broadcast: " + y);
                     }
-                    
-                    // Обновляем масштаб, если он был передан
+
+                    // Обновляем масштаб, если он пришёл
                     if (intent.hasExtra(AppState.KEY_OVERLAY_SCALE)) {
                         float scale = intent.getFloatExtra(AppState.KEY_OVERLAY_SCALE, 1.0f);
                         pendingOverlayScale = String.valueOf(scale);
@@ -291,21 +306,17 @@ public class SettingsActivity extends AppCompatActivity {
                 }
             }
         };
-        
+
         android.content.IntentFilter filter = new android.content.IntentFilter(AppState.ACTION_OVERLAY_UPDATED);
         registerReceiver(overlayUpdateReceiver, filter);
     }
 
-    /**
-     * Активация / деактивация элементов UI для редактирования overlay (позиция, масштаб).
-     * В режиме редактирования (allow=true) — поля активны, иначе отключены.
-     */
+    // Включаем/выключаем элементы редактирования overlay (позиция, масштаб)
     private void applyEditModeEnabled(boolean allow) {
-        // Поля координат и масштаб
         binding.valueOverlayX.setEnabled(allow);
         binding.valueOverlayY.setEnabled(allow);
         binding.seekbarOverlayScale.setEnabled(allow);
-        // Визуальная подсказка (прозрачность полей если выключено)
+
         float alpha = allow ? 1f : 0.4f;
         binding.valueOverlayX.setAlpha(alpha);
         binding.valueOverlayY.setAlpha(alpha);
@@ -316,45 +327,50 @@ public class SettingsActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // Не вызываем refreshValuesFromPreferences(), чтобы не затирать введённые пользователем значения
-        // Значения загружаются только один раз в onCreate()
-        android.util.Log.d("SettingsActivity", "onResume() called. Current pending values: " +
-                "X=" + pendingOverlayX + " Y=" + pendingOverlayY + 
-                " Scale=" + pendingOverlayScale);
-        // Removed alpha broadcast code
+        android.util.Log.d(
+                "SettingsActivity",
+                "onResume() called. Current pending values: " +
+                        "X=" + pendingOverlayX + " Y=" + pendingOverlayY +
+                        " Scale=" + pendingOverlayScale
+        );
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+
+        // Останавливаем таймеры
         timer.cancel();
         statusTimer.cancel();
+
+        // Убираем слушатель клавиатуры
         if (keyboardListener != null) {
             View root = binding.getRoot();
             root.getViewTreeObserver().removeOnGlobalLayoutListener(keyboardListener);
             keyboardListener = null;
         }
+
+        // Отписываемся от overlay-обновлений
         if (overlayUpdateReceiver != null) {
             unregisterReceiver(overlayUpdateReceiver);
             overlayUpdateReceiver = null;
         }
     }
 
-	@Override
-	protected void onPause() {
-		super.onPause();
-		android.util.Log.d("SettingsActivity", "onPause() called. Saving pending values: " +
-				"X=" + pendingOverlayX + " Y=" + pendingOverlayY + 
-				" Scale=" + pendingOverlayScale);
-		applyPendingChanges(true);
-        // Removed alpha broadcast code
-        }
+    @Override
+    protected void onPause() {
+        super.onPause();
+        android.util.Log.d(
+                "SettingsActivity",
+                "onPause() called. Saving pending values: " +
+                        "X=" + pendingOverlayX + " Y=" + pendingOverlayY +
+                        " Scale=" + pendingOverlayScale
+        );
+        // При уходе с экрана сохраняем pending значения
+        applyPendingChanges(true);
+    }
 
-        /**
-     * Добавляет строки из лога в текстовое поле с подсветкой префиксов. Реализация учитывает, что
-     * данные приходят пачками; поэтому храним «хвост» без переводов строк и дорисовываем его при
-     * следующем вызове.
-     */
+    // Добавляет в лог строки с цветовой подсветкой префиксов
     private void appendColored(String text) {
         consoleRemainder.append(text);
         int idx;
@@ -385,12 +401,38 @@ public class SettingsActivity extends AppCompatActivity {
                 binding.textConsole.append(line);
             }
         }
+
         int scrollAmount = binding.textConsole.getLayout() != null
                 ? binding.textConsole.getLayout().getLineTop(binding.textConsole.getLineCount()) - binding.textConsole.getHeight()
                 : 0;
-        if (scrollAmount > 0) binding.textConsole.scrollTo(0, scrollAmount);
+        if (scrollAmount > 0) {
+            binding.textConsole.scrollTo(0, scrollAmount);
+        }
+
+        trimConsoleIfNeeded();
     }
 
+    // Обрезает лог в textConsole, если превышен лимит символов
+    private void trimConsoleIfNeeded() {
+        CharSequence cs = binding.textConsole.getText();
+        if (cs == null) {
+            return;
+        }
+        if (!(cs instanceof android.text.Editable)) {
+            return;
+        }
+        android.text.Editable editable = (android.text.Editable) cs;
+        int len = editable.length();
+        if (len <= CONSOLE_MAX_CHARS) {
+            return;
+        }
+        int keepFrom = len - CONSOLE_MAX_CHARS;
+        editable.delete(0, keepFrom);
+    }
+
+
+
+    // Ищем индекс первого '\n' в StringBuilder
     private static int indexOfNewline(StringBuilder sb) {
         for (int i = 0; i < sb.length(); i++) {
             if (sb.charAt(i) == '\n') return i;
@@ -398,10 +440,7 @@ public class SettingsActivity extends AppCompatActivity {
         return -1;
     }
 
-    /**
-     * Отслеживаем появление/скрытие клавиатуры. Как только клавиатура скрывается — применяем
-     * изменения (если они были), чтобы не хранить несохранённые значения.
-     */
+    // Отслеживаем появление и скрытие клавиатуры
     private void setupKeyboardListener() {
         View root = binding.getRoot();
         keyboardListener = () -> {
@@ -412,8 +451,12 @@ public class SettingsActivity extends AppCompatActivity {
             boolean visible = keyboardHeight > screenHeight * 0.15f;
             if (keyboardVisible != visible) {
                 keyboardVisible = visible;
-                android.util.Log.d("SettingsActivity", "Keyboard visibility changed: " + visible + 
-                        ". Current scale: " + pendingOverlayScale);
+                android.util.Log.d(
+                        "SettingsActivity",
+                        "Keyboard visibility changed: " + visible +
+                                ". Current scale: " + pendingOverlayScale
+                );
+                // При закрытии клавиатуры применяем отложенные изменения
                 if (!visible) {
                     applyPendingChanges(false);
                 }
@@ -422,15 +465,12 @@ public class SettingsActivity extends AppCompatActivity {
         root.getViewTreeObserver().addOnGlobalLayoutListener(keyboardListener);
     }
 
-    /**
-     * Перечитывает актуальные значения из SharedPreferences и заполняет поля ввода без срабатывания
-     * вотчеров. Также сбрасывает флаги «грязности» pending-полей.
-     */
+    // Читаем актуальные значения из prefs и заливаем в поля
     private void refreshValuesFromPreferences() {
         String host = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
         int port = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
-    int overlayX = eliminateTinyOffset(prefs.getInt(AppState.KEY_OVERLAY_X, 0));
-    int overlayY = prefs.getInt(AppState.KEY_OVERLAY_Y, 0);
+        int overlayX = eliminateTinyOffset(prefs.getInt(AppState.KEY_OVERLAY_X, 0));
+        int overlayY = prefs.getInt(AppState.KEY_OVERLAY_Y, 0);
         float overlayScale = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
 
         pendingHost = host;
@@ -439,55 +479,56 @@ public class SettingsActivity extends AppCompatActivity {
         pendingOverlayY = String.valueOf(overlayY);
         pendingOverlayScale = String.valueOf(overlayScale);
 
-        android.util.Log.d("SettingsActivity", "Loaded overlay params: X=" + overlayX + " Y=" + overlayY + 
-                " Scale=" + overlayScale);
+        android.util.Log.d(
+                "SettingsActivity",
+                "Loaded overlay params: X=" + overlayX + " Y=" + overlayY +
+                        " Scale=" + overlayScale
+        );
 
         updateField(binding.valueAddrTCP, pendingHost);
         updateField(binding.valuePortTCP, pendingPort);
         updateField(binding.valueOverlayX, pendingOverlayX);
         updateField(binding.valueOverlayY, pendingOverlayY);
-        
-        // Обновляем SeekBar и TextView для масштаба
+
         int progress = (int) Math.round((overlayScale - 0.1f) / 0.05f);
         binding.seekbarOverlayScale.setProgress(progress);
         binding.textScaleValue.setText(String.format(java.util.Locale.US, "%.2f", overlayScale));
-        
+
         pendingDirty = false;
     }
 
-    /**
-     * Сохраняет накопленные изменения в SharedPreferences. Валидация порта/scale не даёт
-     * записать некорректные значения; если поле пустое — оставляем прежнее.
-     *
-     * @param force true, если нужно сохранить даже без флага pendingDirty (например, при паузе).
-     */
+    // Сохраняем pending-значения в prefs (с валидацией)
     private void applyPendingChanges(boolean force) {
         if (!force && !pendingDirty) {
             return;
         }
 
+        // IP
         String hostValue = pendingHost != null ? pendingHost.trim() : "";
         if (hostValue.isEmpty()) {
             hostValue = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
         }
 
+        // Порт
         Integer portValue = parseIntSafe(pendingPort, 1, 65535);
         if (portValue == null) {
             portValue = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
         }
 
-        // Overlay координаты и масштаб
+        // X overlay
         Integer overlayXValue = parseIntSafe(pendingOverlayX, -10000, 10000);
         if (overlayXValue == null) {
             overlayXValue = prefs.getInt(AppState.KEY_OVERLAY_X, 0);
         }
         overlayXValue = eliminateTinyOffset(overlayXValue);
 
+        // Y overlay
         Integer overlayYValue = parseIntSafe(pendingOverlayY, -10000, 10000);
         if (overlayYValue == null) {
             overlayYValue = prefs.getInt(AppState.KEY_OVERLAY_Y, 0);
         }
 
+        // Масштаб overlay
         Float overlayScaleValue = parseFloatSafe(pendingOverlayScale, 0.1f, 5.0f);
         if (overlayScaleValue == null) {
             overlayScaleValue = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
@@ -495,6 +536,7 @@ public class SettingsActivity extends AppCompatActivity {
 
         boolean changed = false;
         android.content.SharedPreferences.Editor editor = prefs.edit();
+
         if (!hostValue.equals(prefs.getString(AppState.KEY_TCP_HOST, ""))) {
             editor.putString(AppState.KEY_TCP_HOST, hostValue);
             changed = true;
@@ -515,10 +557,14 @@ public class SettingsActivity extends AppCompatActivity {
             editor.putFloat(AppState.KEY_OVERLAY_SCALE, overlayScaleValue);
             changed = true;
         }
+
         if (changed) {
             editor.apply();
-            android.util.Log.d("SettingsActivity", "Saved overlay params: X=" + overlayXValue + " Y=" + overlayYValue + 
-                    " Scale=" + overlayScaleValue);
+            android.util.Log.d(
+                    "SettingsActivity",
+                    "Saved overlay params: X=" + overlayXValue + " Y=" + overlayYValue +
+                            " Scale=" + overlayScaleValue
+            );
         }
 
         pendingHost = hostValue;
@@ -532,17 +578,13 @@ public class SettingsActivity extends AppCompatActivity {
         updateField(binding.valuePortTCP, pendingPort);
         updateField(binding.valueOverlayX, pendingOverlayX);
         updateField(binding.valueOverlayY, pendingOverlayY);
-        
-        // Обновляем SeekBar и TextView для масштаба
+
         int progress = (int) Math.round((overlayScaleValue - 0.1f) / 0.05f);
         binding.seekbarOverlayScale.setProgress(progress);
         binding.textScaleValue.setText(String.format(java.util.Locale.US, "%.2f", overlayScaleValue));
     }
 
-    /**
-     * Безопасно парсит целое число в заданных пределах. Возвращает null, если строка пустая или
-     * выходит за рамки — в этом случае используем предыдущее значение.
-     */
+    // Безопасный разбор int в заданном диапазоне
     private Integer parseIntSafe(String value, int min, int max) {
         if (value == null) return null;
         try {
@@ -556,13 +598,12 @@ public class SettingsActivity extends AppCompatActivity {
         }
     }
 
+    // Сносим мелкий сдвиг координаты к 0
     private int eliminateTinyOffset(int valuePx) {
         return Math.abs(valuePx) <= 12 ? 0 : valuePx;
     }
-    /**
-     * Безопасно парсит float в заданных пределах. Возвращает null, если строка пустая или
-     * выходит за рамки — в этом случае используем предыдущее значение.
-     */
+
+    // Безопасный разбор float в заданном диапазоне
     private Float parseFloatSafe(String value, float min, float max) {
         if (value == null) return null;
         try {
@@ -576,9 +617,7 @@ public class SettingsActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Обновляет текстовое поле, временно отключая вотчеры, чтобы не выставлять лишний pendingDirty.
-     */
+    // Обновляем EditText без срабатывания вотчеров
     private void updateField(android.widget.EditText field, String value) {
         String target = value != null ? value : "";
         String current = field.getText() != null ? field.getText().toString() : "";
@@ -591,9 +630,7 @@ public class SettingsActivity extends AppCompatActivity {
         suppressWatchers = false;
     }
 
-    /**
-     * Перезапускает FloatingOverlayService для применения новых настроек позиции и размера.
-     */
+    // Посылаем сервису команду пересоздать overlay (сейчас не используется)
     private void restartOverlayService() {
         android.content.Intent recreateIntent = new android.content.Intent(this, FloatingOverlayService.class);
         recreateIntent.setAction(FloatingOverlayService.ACTION_RECREATE_OVERLAY);

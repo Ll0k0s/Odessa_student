@@ -1,3 +1,8 @@
 package com.example.androidbuttons;
 
-public final class StateStripController { }
+// Контроллер полосы состояния (резерв под будущую логику)
+public final class StateStripController {
+
+    // Запрещаем создание экземпляров
+    private StateStripController() { }
+}

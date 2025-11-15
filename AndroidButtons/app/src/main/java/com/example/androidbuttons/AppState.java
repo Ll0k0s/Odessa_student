@@ -4,49 +4,37 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.LinkedBlockingQueue;
 
 public final class AppState {
-    /**
-     * Утилитарный контейнер с глобальными флагами/очередями. Чтобы исключить создание экземпляра,
-     * объявляем приватный конструктор без тела.
-     */
+
+    // Запрещаем создавать экземпляры
     private AppState() {}
 
-    /**
-     * Номер текущего выбранного локомотива (1..8). Используем AtomicInteger, чтобы изменения из
-     * разных потоков (UI/сервисов) были атомарными и не требовали дополнительной синхронизации.
-     */
+    // Текущий выбранный локомотив (1..8)
     public static final AtomicInteger selectedLoco = new AtomicInteger(1);
 
-    /**
-     * Потокобезопасная очередь для накопления логов между сервисами и экраном настроек. Очередь
-     * наполняется в MainActivity и сервисах, а SettingsActivity периодически считывает её содержимое.
-     */
+    // Очередь лога между сервисами и экраном настроек
     public static final LinkedBlockingQueue<String> consoleQueue = new LinkedBlockingQueue<>();
 
-    /**
-     * Название файла SharedPreferences и ключи настроек сети. Используются как в
-     * SettingsActivity для записи, так и в MainActivity при первичной инициализации компонентов.
-     */
+    // Имя SharedPreferences
     public static final String PREFS_NAME = "androidbuttons_prefs";
+
+    // Ключи настроек TCP
     public static final String KEY_TCP_HOST = "tcp_host";
     public static final String KEY_TCP_PORT = "tcp_port";
-    
-    /**
-     * Ключи для сохранения позиции и масштаба overlay окна.
-     */
+
+    // TCP по умолчанию (для инициализации)
+    public static final String DEFAULT_TCP_HOST = "192.168.2.6";
+    public static final int DEFAULT_TCP_PORT = 9000;
+
+    // Ключи позиции и масштаба overlay
     public static final String KEY_OVERLAY_X = "overlay_x";
     public static final String KEY_OVERLAY_Y = "overlay_y";
     public static final String KEY_OVERLAY_SCALE = "overlay_scale";
     public static final String KEY_OVERLAY_ALLOW_MODIFICATION = "overlay_allow_modification";
-    
-    /**
-     * Broadcast action для уведомления об изменении позиции или масштаба overlay окна.
-     */
+
+    // Action для обновления overlay из сервиса
     public static final String ACTION_OVERLAY_UPDATED = "com.example.androidbuttons.OVERLAY_UPDATED";
 
-    /**
-     * Флаги состояния подключения. Они обновляются менеджером TCP и отображаются в интерфейсе
-     * настроек. Используем volatile, чтобы изменения были видимы между потоками без блокировок.
-     */
+    // Флаги состояния TCP
     public static volatile boolean tcpConnecting = false;
     public static volatile boolean tcpConnected = false;
     public static volatile boolean tcpReachable = false;

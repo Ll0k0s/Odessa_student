@@ -26,10 +26,12 @@ android {
             )
         }
     }
+    // Переход на Java 17 во избежание ошибки парсинга версии (IllegalArgumentException: 25)
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
+    // Проект не использует Kotlin — блок настроек Kotlin удалён.
     buildFeatures {
         viewBinding = true
     }

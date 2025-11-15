@@ -1,6 +1,5 @@
 package com.example.androidbuttons;
 
-import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -13,13 +12,9 @@ import android.util.Log;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.appcompat.app.AppCompatActivity;
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.AppCompatActivity;
 
-/**
- * Главный экран приложения. Управляет соединениями (TCP/USB), запускает overlay-сервис,
- * отправляет команды и синхронизирует UI-состояние. Комментарии ниже объясняют цепочки событий.
- */
 public class MainActivity extends AppCompatActivity {
 
     public static final String EXTRA_OPEN_SETTINGS = "com.example.androidbuttons.EXTRA_OPEN_SETTINGS";
@@ -36,39 +31,40 @@ public class MainActivity extends AppCompatActivity {
     private int currentState = 0;
     private boolean settingsLaunched = false;
     private java.util.Timer tcpStatusTimer;
+    private final java.util.concurrent.ExecutorService bgExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+    private Boolean lastStatusConnected = null;
 
-    /**
-     * Слушатель, которым overlay-сервис сообщает о выборе состояния пользователем. Все действия
-     * выполняем на UI-потоке, чтобы гарантировать корректное взаимодействие с виджетами/менеджерами.
-     */
     private final StateBus.OverlaySelectionListener overlaySelectionListener = state ->
-        runOnUiThread(() -> handleOverlaySelection(state));
+            runOnUiThread(() -> handleOverlaySelection(state));
 
     private final SharedPreferences.OnSharedPreferenceChangeListener prefListener = (sharedPrefs, key) -> {
         if (sharedPrefs == null || key == null) {
             return;
         }
+
+        // Реакция только на изменения IP/порта
         if (AppState.KEY_TCP_HOST.equals(key) || AppState.KEY_TCP_PORT.equals(key)) {
             String host = sharedPrefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
             int port = sharedPrefs.getInt(AppState.KEY_TCP_PORT, 9000);
             if (host != null) {
                 host = host.trim();
             }
+
+            // Отключаем старое авто-подключение и разрываем текущее соединение
             tcpManager.disableAutoConnect();
             tcpManager.disconnect();
+
+            // Запускаем авто-подключение к новому адресу
             tcpManager.enableAutoConnect(host, port);
-            tcpManager.connect(host, port);
         }
     };
-
 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Launcher для открытия SettingsActivity. После возврата сворачиваем главную активити,
-        // чтобы повторно попасть сюда только через иконку или системное «Недавние».
         settingsLauncher = registerForActivityResult(
                 new ActivityResultContracts.StartActivityForResult(),
                 result -> {
@@ -81,8 +77,6 @@ public class MainActivity extends AppCompatActivity {
 
         uiBuffer = new DataBuffer(256, data -> AppState.consoleQueue.offer(data));
 
-        // Инициализация TCP-менеджера. Колбэки приводим к UI-потоку, чтобы обновлять глобальные флаги
-        // и лог. Основная логика — реагировать только на сообщения, относящиеся к выбранному локомотиву.
         tcpManager = new TcpManager(
                 () -> runOnUiThread(() -> {
                     AppState.tcpConnecting = true;
@@ -104,21 +98,26 @@ public class MainActivity extends AppCompatActivity {
                         if (ln.isEmpty()) {
                             continue;
                         }
+
+                        if (ln.startsWith("[TCP]")) {
+                            uiBuffer.offer(ln + "\n");
+                            continue;
+                        }
+
                         int locoVal = extractDecimal(ln, "loco=");
                         if (locoVal <= 0 || locoVal != locoTarget) {
                             continue;
                         }
                         int stateVal = extractDecimal(ln, "state=");
-                        if (stateVal < 1 || stateVal > 6) {
+                        // Диапазон от железа: 1..5
+                        if (stateVal < 1 || stateVal > 5) {
                             continue;
                         }
 
                         uiBuffer.offer("[#TCP_RX#]" + "Rx: loco" + locoVal + " -> state" + stateVal + "\n");
 
                         final int stateCopy = stateVal;
-                        runOnUiThread(() -> {
-                            updateStateFromExternal(stateCopy);
-                        });
+                        runOnUiThread(() -> updateStateFromExternal(stateCopy));
                     }
                 },
                 error -> {
@@ -129,98 +128,70 @@ public class MainActivity extends AppCompatActivity {
                     AppState.tcpConnected = connected;
                     AppState.tcpReachable = connected;
                     Log.d("MainActivity", "TCP status changed: " + status + " -> connected=" + connected);
+
+                    if (lastStatusConnected == null || !lastStatusConnected.equals(connected)) {
+                        lastStatusConnected = connected;
+                        if (connected) {
+                            uiBuffer.offer("[#TCP_STATUS#]TCP connected\n");
+                        } else {
+                            uiBuffer.offer("[#TCP_STATUS#]TCP disconnected\n");
+                        }
+                    }
                 })
         );
-
-
-
 
         prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
         prefs.registerOnSharedPreferenceChangeListener(prefListener);
         String initHost = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
         int initPort = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
+        if (initHost != null) initHost = initHost.trim();
         tcpManager.enableAutoConnect(initHost, initPort);
-        
-        // Устанавливаем начальное состояние = 1 (зелёный светофор) при запуске
+
         updateStateFromExternal(1);
         StateBus.publishOverlaySelection(1);
         Log.d("MainActivity", "Initial state set to 1 (green)");
 
-    // Стартовая быстрая проверка (фоновая)
-    runOffUi(() -> performTcpHealthCheck("init"));
-
-        // Запускаем периодическую проверку TCP статуса каждую секунду
         tcpStatusTimer = new java.util.Timer();
         tcpStatusTimer.scheduleAtFixedRate(new java.util.TimerTask() {
             @Override
             public void run() {
                 performTcpHealthCheck("tick");
             }
-        }, 1000, 1000); // Проверяем каждую 1 секунду после первой секунды
+        }, 1000, 1000);
     }
 
     private void performTcpHealthCheck(String phase) {
-        // Никогда не выполняем потенциально сетевую часть на UI потоке
         if (android.os.Looper.getMainLooper().isCurrentThread()) {
             runOffUi(() -> performTcpHealthCheck(phase + "_bg"));
             return;
         }
         boolean connectionAlive = tcpManager.checkConnectionAlive();
-        boolean wasConnected = AppState.tcpConnected;
-
-        // Всегда делаем probe независимо от флага connectionAlive, чтобы обнаружить "зомби" сокет
-        boolean endpointReachable = tcpManager.isEndpointReachable(600);
-        // Если сокет считался живым, но probe упал — считаем соединение потерянным
-        if (connectionAlive && !endpointReachable) {
-            Log.w("MainActivity", "Zombie TCP socket detected (socket alive, probe failed). Forcing disconnect");
-            connectionAlive = false;
-            runOnUiThread(() -> tcpManager.disconnect());
-        }
-        boolean wasReachable = AppState.tcpReachable;
-
-        String host = tcpManager.getTargetHost();
-        int port = tcpManager.getTargetPort();
-
-        if (wasConnected != connectionAlive) {
-            Log.w("MainActivity", "TCP connection state changed: " + wasConnected + " -> " + connectionAlive +
-                    " (phase=" + phase + ")");
-            if (!connectionAlive && wasConnected) {
-                runOnUiThread(() -> {
-                    tcpManager.disconnect();
-                    Log.e("MainActivity", "Connection lost, forcing disconnect (phase=" + phase + ")");
-                });
-            }
-        }
-
-        if (wasReachable != endpointReachable) {
-            Log.w("MainActivity", "TCP reachability changed: " + wasReachable + " -> " + endpointReachable +
-                    " (phase=" + phase + ")");
-        }
-
+        boolean endpointReachable = connectionAlive || tcpManager.isEndpointReachable(600);
+        // Обновляем только флаги, без принудительного разрыва и переподключения
         AppState.tcpConnected = connectionAlive;
         AppState.tcpReachable = endpointReachable;
-
     }
 
-    // Простой вспомогательный метод для запуска фоновых задач без создания лишних исполнителей
     private void runOffUi(Runnable r) {
-        java.util.concurrent.Executors.newSingleThreadExecutor().execute(r);
+        bgExecutor.execute(r);
     }
-
-    // Упрощенный health-check: публикация в консоль отключена по запросу пользователя
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        
-        // Останавливаем таймер проверки TCP статуса
+
         if (tcpStatusTimer != null) {
             tcpStatusTimer.cancel();
             tcpStatusTimer = null;
         }
-        
-        tcpManager.disableAutoConnect();
-        tcpManager.disconnect();
+
+        // Корректно гасим TcpManager (авто-подключение, соединение и его потоки)
+        if (tcpManager != null) {
+            tcpManager.shutdown();
+        }
+
+        bgExecutor.shutdownNow();
+
         if (prefs != null) {
             try {
                 prefs.unregisterOnSharedPreferenceChangeListener(prefListener);
@@ -229,8 +200,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         uiBuffer.close();
-        
-        // Останавливаем overlay-сервис при закрытии активити
+
         try {
             Intent svcIntent = new Intent(this, FloatingOverlayService.class);
             stopService(svcIntent);
@@ -250,6 +220,7 @@ public class MainActivity extends AppCompatActivity {
 
         String host = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
         int port = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
+        if (host != null) host = host.trim();
         tcpManager.updateTarget(host, port);
 
         ensureOverlayServiceRunning();
@@ -274,10 +245,6 @@ public class MainActivity extends AppCompatActivity {
         processLaunchFlags(intent, true);
     }
 
-    /**
-     * Обрабатывает флаги запуска (от системных ресиверов/shortcut). Позволяет открыть настройки или
-     * отправить приложение в фон сразу после старта.
-     */
     private void processLaunchFlags(@Nullable Intent sourceIntent, boolean fromNewIntent) {
         if (sourceIntent == null) {
             return;
@@ -305,9 +272,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Стартует SettingsActivity с отключенной анимацией перехода.
-     */
     private void launchSettingsActivity() {
         Intent intent = new Intent(this, SettingsActivity.class);
         if (settingsLauncher != null) {
@@ -318,10 +282,6 @@ public class MainActivity extends AppCompatActivity {
         overridePendingTransition(0, 0);
     }
 
-    /**
-     * Реагирует на выбор состояния пользователем в overlay: применяет новый режим и триггерит
-     * отправку команд.
-     */
     private void handleOverlaySelection(int state) {
         if (state < 1 || state > 5) {
             return;
@@ -329,15 +289,10 @@ public class MainActivity extends AppCompatActivity {
         applyStripState(state, true);
     }
 
-    /**
-     * Главный метод смены состояния: обновляет локальное значение, при необходимости рассылку
-     * команды и уведомление StateBus. Используется как локальными, так и внешними событиями.
-     */
     private void applyStripState(int state, boolean sendCommands) {
         if (state < 1 || state > 5) {
             return;
         }
-        // Блокируем смену состояния, если включён режим редактирования overlay
         boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
         if (allowModification) {
             Log.d(TAG_SERVICE, "applyStripState ignored in edit mode state=" + state);
@@ -350,10 +305,6 @@ public class MainActivity extends AppCompatActivity {
         StateBus.publishStripState(state);
     }
 
-    /**
-     * Обновляет состояние полосы в ответ на внешние сигналы (TCP/UART). Не инициирует повторную
-     * отправку, чтобы избежать циклов.
-     */
     private void updateStateFromExternal(int state) {
         if (state < 1 || state > 5) {
             return;
@@ -370,10 +321,6 @@ public class MainActivity extends AppCompatActivity {
         StateBus.publishStripState(state);
     }
 
-    /**
-     * Вытаскивает положительное целое после заданного токена (например, "loco=" или "state=").
-     * Возвращает -1, если токен отсутствует или значение не удалось считать.
-     */
     private int extractDecimal(String line, String token) {
         if (line == null || token == null) {
             return -1;
@@ -398,10 +345,6 @@ public class MainActivity extends AppCompatActivity {
         return has ? value : -1;
     }
 
-    /**
-     * Проверяет разрешение на overlay и запускает сервис, если его ещё нет. При необходимости
-     * запрашивает разрешение у пользователя.
-     */
     private void ensureOverlayServiceRunning() {
         try {
             Context appCtx = getApplicationContext();
@@ -432,9 +375,6 @@ public class MainActivity extends AppCompatActivity {
         return Settings.canDrawOverlays(this);
     }
 
-    /**
-     * Запускает системный экран для выдачи разрешения на overlay.
-     */
     private void requestOverlayPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return;
@@ -469,13 +409,10 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Отправляет команду «эксклюзивного состояния»: один байт состояния для выбранного локомотива.
-     * Команда отправляется в TCP и протоколируется в консоли.
-     */
     private void sendExclusiveRelays(int active) {
         int loco = AppState.selectedLoco.get();
-        int state = Math.max(1, Math.min(6, active));
+        // Диапазон протокола: 1..5
+        int state = Math.max(1, Math.min(5, active));
         tcpManager.sendControl(loco, state);
         if (tcpManager.connectionActive()) {
             uiBuffer.offer("[#TCP_TX#]" + "Tx: loco" + loco + " -> state" + state + "\n");

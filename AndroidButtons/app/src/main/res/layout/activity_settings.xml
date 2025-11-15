@@ -35,9 +35,9 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:text="@string/settings_title"
+                android:textColor="#FFFFFF"
                 android:textSize="@dimen/title_text_size"
-                android:textStyle="bold"
-                android:textColor="#FFFFFF" />
+                android:textStyle="bold" />
 
         </LinearLayout>
 
@@ -72,7 +72,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Статус подключения"
+                        android:text="Статус підключення"
                         android:textSize="@dimen/section_title_text_size"
                         android:textStyle="bold"
                         android:textColor="#FFFFFF" />
@@ -154,7 +154,7 @@
                         android:id="@+id/title_tcp"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Настройки TCP"
+                        android:text="Налаштування TCP"
                         android:textSize="@dimen/section_title_text_size"
                         android:textStyle="bold"
                         android:textColor="#FFFFFF" />
@@ -298,7 +298,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Всплывающее окно"
+                        android:text="Вспливающе вікно"
                         android:textSize="@dimen/section_title_text_size"
                         android:textStyle="bold"
                         android:textColor="#FFFFFF" />
@@ -326,7 +326,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Разрешить изменение окна"
+                        android:text="Дозволити зміну вікна"
                         android:textColor="#E0E0E0"
                         android:textSize="@dimen/body_text_size" />
 
@@ -341,7 +341,7 @@
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:hint="Позиция X (px от левого края)"
+                    android:hint="Позиція X (x від лівого краю)"
                     app:boxBackgroundMode="outline"
                     app:boxStrokeColor="#00E676"
                     app:hintTextColor="#00E676"
@@ -369,7 +369,7 @@
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:hint="Позиция Y (px от верхнего края)"
+                    android:hint="Позиція Y (px від верхнього краю)"
                     app:boxBackgroundMode="outline"
                     app:boxStrokeColor="#00E676"
                     app:hintTextColor="#00E676"
