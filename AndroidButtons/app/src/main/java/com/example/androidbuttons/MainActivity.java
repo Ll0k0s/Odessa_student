@@ -3,10 +3,10 @@ package com.example.androidbuttons;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
 
@@ -15,51 +15,55 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.example.androidbuttons.core.AppContracts;
+import com.example.androidbuttons.core.AppGraph;
+import com.example.androidbuttons.core.ConsoleLogRepository;
+import com.example.androidbuttons.core.OverlaySettingsRepository;
+import com.example.androidbuttons.core.OverlayStateStore;
+import com.example.androidbuttons.core.TcpConfigRepository;
+import com.example.androidbuttons.core.TcpStatusStore;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+
 public class MainActivity extends AppCompatActivity {
 
     public static final String EXTRA_OPEN_SETTINGS = "com.example.androidbuttons.EXTRA_OPEN_SETTINGS";
     public static final String EXTRA_HIDE_AFTER_BOOT = "com.example.androidbuttons.EXTRA_HIDE_AFTER_BOOT";
 
     private static final String TAG_SERVICE = "MainActivitySvc";
+    private static final String DEFAULT_HOST = "192.168.2.6";
+    private static final int DEFAULT_PORT = 9000;
     private static final int REQUEST_OVERLAY_PERMISSION = 1001;
 
     private TcpManager tcpManager;
     private DataBuffer uiBuffer;
-    private SharedPreferences prefs;
     private ActivityResultLauncher<Intent> settingsLauncher;
     private boolean overlayPermissionRequested = false;
     private int currentState = 0;
     private boolean settingsLaunched = false;
     private java.util.Timer tcpStatusTimer;
-    private final java.util.concurrent.ExecutorService bgExecutor =
-            java.util.concurrent.Executors.newSingleThreadExecutor();
+    private final ExecutorService bgExecutor = Executors.newSingleThreadExecutor();
     private Boolean lastStatusConnected = null;
 
-    private final StateBus.OverlaySelectionListener overlaySelectionListener = state ->
+    private OverlaySettingsRepository overlaySettingsRepository;
+    private OverlaySettingsRepository.OverlaySettings overlaySettings;
+    private OverlayStateStore overlayStateStore;
+    private TcpConfigRepository tcpConfigRepository;
+    private TcpConfigRepository.TcpConfig currentTcpConfig;
+    private final AtomicInteger selectedLoco = new AtomicInteger(1);
+    private TcpStatusStore tcpStatusStore;
+    private ConsoleLogRepository consoleLogRepository;
+
+    private final OverlayStateStore.SelectionListener overlaySelectionListener = state ->
             runOnUiThread(() -> handleOverlaySelection(state));
 
-    private final SharedPreferences.OnSharedPreferenceChangeListener prefListener = (sharedPrefs, key) -> {
-        if (sharedPrefs == null || key == null) {
-            return;
-        }
+    private final OverlaySettingsRepository.Listener overlaySettingsListener = settings ->
+            runOnUiThread(() -> overlaySettings = settings);
 
-        // Реакция только на изменения IP/порта
-        if (AppState.KEY_TCP_HOST.equals(key) || AppState.KEY_TCP_PORT.equals(key)) {
-            String host = sharedPrefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
-            int port = sharedPrefs.getInt(AppState.KEY_TCP_PORT, 9000);
-            if (host != null) {
-                host = host.trim();
-            }
-
-            // Отключаем старое авто-подключение и разрываем текущее соединение
-            tcpManager.disableAutoConnect();
-            tcpManager.disconnect();
-
-            // Запускаем авто-подключение к новому адресу
-            tcpManager.enableAutoConnect(host, port);
-        }
-    };
-
+    private final TcpConfigRepository.Listener tcpConfigListener = config ->
+            runOnUiThread(() -> applyTcpConfig(config, true));
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -75,81 +79,36 @@ public class MainActivity extends AppCompatActivity {
                 }
         );
 
-        uiBuffer = new DataBuffer(256, data -> AppState.consoleQueue.offer(data));
+        AppGraph graph = AppGraph.get();
+        overlaySettingsRepository = graph.overlaySettings();
+        overlaySettings = overlaySettingsRepository.get();
+        overlayStateStore = graph.overlayStates();
+        tcpConfigRepository = graph.tcpConfig();
+        currentTcpConfig = tcpConfigRepository.get();
+        selectedLoco.set(currentTcpConfig.selectedLoco);
+        tcpStatusStore = graph.tcpStatuses();
+        consoleLogRepository = graph.consoleLog();
+
+        overlaySettingsRepository.addListener(overlaySettingsListener);
+        tcpConfigRepository.addListener(tcpConfigListener);
+
+        uiBuffer = new DataBuffer(256, consoleLogRepository::append);
 
         tcpManager = new TcpManager(
-                () -> runOnUiThread(() -> {
-                    AppState.tcpConnecting = true;
-                }),
-                () -> runOnUiThread(() -> {
-                    AppState.tcpConnecting = false;
-                }),
-                data -> {
-                    if (data == null || data.isEmpty()) {
-                        return;
-                    }
-                    String[] lines = data.split("\n");
-                    int locoTarget = AppState.selectedLoco.get();
-                    for (String line : lines) {
-                        if (line == null) {
-                            continue;
-                        }
-                        String ln = line.trim();
-                        if (ln.isEmpty()) {
-                            continue;
-                        }
-
-                        if (ln.startsWith("[TCP]")) {
-                            uiBuffer.offer(ln + "\n");
-                            continue;
-                        }
-
-                        int locoVal = extractDecimal(ln, "loco=");
-                        if (locoVal <= 0 || locoVal != locoTarget) {
-                            continue;
-                        }
-                        int stateVal = extractDecimal(ln, "state=");
-                        // Диапазон от железа: 1..5
-                        if (stateVal < 1 || stateVal > 5) {
-                            continue;
-                        }
-
-                        uiBuffer.offer("[#TCP_RX#]" + "Rx: loco" + locoVal + " -> state" + stateVal + "\n");
-
-                        final int stateCopy = stateVal;
-                        runOnUiThread(() -> updateStateFromExternal(stateCopy));
-                    }
-                },
+                () -> runOnUiThread(() -> tcpStatusStore.update(TcpStatusStore.TcpStatus.connecting())),
+                () -> runOnUiThread(() -> tcpStatusStore.update(TcpStatusStore.TcpStatus.disconnected())),
+                data -> handleTcpPayload(data, selectedLoco.get()),
                 error -> {
                     // suppress UI noise
                 },
-                status -> runOnUiThread(() -> {
-                    boolean connected = "connected".equals(status);
-                    AppState.tcpConnected = connected;
-                    AppState.tcpReachable = connected;
-                    Log.d("MainActivity", "TCP status changed: " + status + " -> connected=" + connected);
-
-                    if (lastStatusConnected == null || !lastStatusConnected.equals(connected)) {
-                        lastStatusConnected = connected;
-                        if (connected) {
-                            uiBuffer.offer("[#TCP_STATUS#]TCP connected\n");
-                        } else {
-                            uiBuffer.offer("[#TCP_STATUS#]TCP disconnected\n");
-                        }
-                    }
-                })
+                status -> runOnUiThread(() -> handleTcpStatus(status))
         );
 
-        prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-        prefs.registerOnSharedPreferenceChangeListener(prefListener);
-        String initHost = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
-        int initPort = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
-        if (initHost != null) initHost = initHost.trim();
-        tcpManager.enableAutoConnect(initHost, initPort);
+        applyTcpConfig(currentTcpConfig, true);
 
         updateStateFromExternal(1);
-        StateBus.publishOverlaySelection(1);
-        Log.d("MainActivity", "Initial state set to 1 (green)");
+        overlayStateStore.publishSelection(1);
+        Log.d(AppContracts.LOG_TAG_MAIN, "Initial state set to 1 (green)");
 
         tcpStatusTimer = new java.util.Timer();
         tcpStatusTimer.scheduleAtFixedRate(new java.util.TimerTask() {
@@ -160,21 +119,51 @@ public class MainActivity extends AppCompatActivity {
         }, 1000, 1000);
     }
 
+    private void handleTcpPayload(String data, int locoTarget) {
+        if (data == null || data.isEmpty()) {
+            return;
+        }
+        String[] lines = data.split("\n");
+        for (String line : lines) {
+            if (line == null) {
+                continue;
+            }
+            String ln = line.trim();
+            if (ln.isEmpty()) {
+                continue;
+            }
+
+            if (ln.startsWith("[TCP]")) {
+                uiBuffer.offer(ln + "\n");
+                continue;
+            }
+
+            int locoVal = extractDecimal(ln, "loco=");
+            if (locoVal <= 0 || locoVal != locoTarget) {
+                continue;
+            }
+            int stateVal = extractDecimal(ln, "state=");
+            if (stateVal < 1 || stateVal > 5) {
+                continue;
+            }
+
+            uiBuffer.offer("[#TCP_RX#]" + "Rx: loco" + locoVal + " -> state" + stateVal + "\n");
+            final int stateCopy = stateVal;
+            runOnUiThread(() -> updateStateFromExternal(stateCopy));
+        }
+    }
+
     private void performTcpHealthCheck(String phase) {
-        // Никогда не выполняем работу на UI-потоке
-        if (android.os.Looper.getMainLooper().isCurrentThread()) {
+        if (Looper.getMainLooper().isCurrentThread()) {
             runOffUi(() -> performTcpHealthCheck(phase + "_bg"));
             return;
         }
-
-        // Пассивно проверяем, живо ли текущее соединение
         boolean connectionAlive = tcpManager.checkConnectionAlive();
-
-        // Обновляем только флаги, без дополнительных TCP-подключений
-        AppState.tcpConnected = connectionAlive;
-        AppState.tcpReachable = connectionAlive;
+        TcpStatusStore.TcpStatus currentStatus = tcpStatusStore.get();
+        if (currentStatus.reachable != connectionAlive) {
+            tcpStatusStore.update(currentStatus.withReachable(connectionAlive));
+        }
     }
-
 
     private void runOffUi(Runnable r) {
         bgExecutor.execute(r);
@@ -189,21 +178,15 @@ public class MainActivity extends AppCompatActivity {
             tcpStatusTimer = null;
         }
 
-        // Корректно гасим TcpManager (авто-подключение, соединение и его потоки)
         if (tcpManager != null) {
             tcpManager.shutdown();
         }
 
         bgExecutor.shutdownNow();
-
-        if (prefs != null) {
-            try {
-                prefs.unregisterOnSharedPreferenceChangeListener(prefListener);
-            } catch (Exception ignored) {
-                // no-op
-            }
-        }
         uiBuffer.close();
+
+        overlaySettingsRepository.removeListener(overlaySettingsListener);
+        tcpConfigRepository.removeListener(tcpConfigListener);
 
         try {
             Intent svcIntent = new Intent(this, FloatingOverlayService.class);
@@ -217,29 +200,19 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
 
-        if (prefs == null) {
-            prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-            prefs.registerOnSharedPreferenceChangeListener(prefListener);
-        }
-
-        String host = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
-        int port = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
-        if (host != null) host = host.trim();
-        tcpManager.updateTarget(host, port);
-
         ensureOverlayServiceRunning();
-        StateBus.registerSelectionListener(overlaySelectionListener);
+        overlayStateStore.addSelectionListener(overlaySelectionListener);
         if (currentState > 0) {
-            StateBus.publishStripState(currentState);
+            overlayStateStore.publish(currentState);
         }
-
+        applyTcpConfig(currentTcpConfig, false);
         processLaunchFlags(getIntent(), false);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        StateBus.unregisterSelectionListener(overlaySelectionListener);
+        overlayStateStore.removeSelectionListener(overlaySelectionListener);
     }
 
     @Override
@@ -297,8 +270,7 @@ public class MainActivity extends AppCompatActivity {
         if (state < 1 || state > 5) {
             return;
         }
-        boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-        if (allowModification) {
+        if (isOverlayInEditMode()) {
             Log.d(TAG_SERVICE, "applyStripState ignored in edit mode state=" + state);
             return;
         }
@@ -306,23 +278,19 @@ public class MainActivity extends AppCompatActivity {
         if (sendCommands) {
             sendExclusiveRelays(state);
         }
-        StateBus.publishStripState(state);
+        overlayStateStore.publish(state);
     }
 
     private void updateStateFromExternal(int state) {
-        if (state < 1 || state > 5) {
+        if (state < 1 || state > 5 || state == currentState) {
             return;
         }
-        if (state == currentState) {
-            return;
-        }
-        boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-        if (allowModification) {
+        if (isOverlayInEditMode()) {
             Log.d(TAG_SERVICE, "External state update ignored (edit mode) state=" + state);
             return;
         }
         currentState = state;
-        StateBus.publishStripState(state);
+        overlayStateStore.publish(state);
     }
 
     private int extractDecimal(String line, String token) {
@@ -414,12 +382,50 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void sendExclusiveRelays(int active) {
-        int loco = AppState.selectedLoco.get();
-        // Диапазон протокола: 1..5
+        int loco = selectedLoco.get();
         int state = Math.max(1, Math.min(5, active));
         tcpManager.sendControl(loco, state);
         if (tcpManager.connectionActive()) {
             uiBuffer.offer("[#TCP_TX#]" + "Tx: loco" + loco + " -> state" + state + "\n");
+        }
+    }
+
+    private void applyTcpConfig(@Nullable TcpConfigRepository.TcpConfig config, boolean restart) {
+        if (config == null) {
+            return;
+        }
+        currentTcpConfig = config;
+        selectedLoco.set(config.selectedLoco);
+        String host = config.host != null ? config.host.trim() : "";
+        if (host.isEmpty()) {
+            host = DEFAULT_HOST;
+        }
+        int port = config.port <= 0 ? DEFAULT_PORT : config.port;
+        if (restart) {
+            tcpManager.disableAutoConnect();
+            tcpManager.disconnect();
+            tcpManager.enableAutoConnect(host, port);
+        } else {
+            tcpManager.updateTarget(host, port);
+        }
+    }
+
+    private boolean isOverlayInEditMode() {
+        return overlaySettings != null && overlaySettings.editAllowed;
+    }
+
+    private void handleTcpStatus(String status) {
+        boolean connected = "connected".equals(status);
+        tcpStatusStore.update(connected
+                ? TcpStatusStore.TcpStatus.connected()
+                : TcpStatusStore.TcpStatus.disconnected());
+        if (lastStatusConnected == null || !lastStatusConnected.equals(connected)) {
+            lastStatusConnected = connected;
+            if (connected) {
+                uiBuffer.offer("[#TCP_STATUS#]TCP connected\n");
+            } else {
+                uiBuffer.offer("[#TCP_STATUS#]TCP disconnected\n");
+            }
         }
     }
 }

@@ -6,7 +6,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.Handler;
@@ -26,6 +25,11 @@ import androidx.annotation.Nullable;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.example.androidbuttons.core.AppContracts;
+import com.example.androidbuttons.core.AppGraph;
+import com.example.androidbuttons.core.OverlaySettingsRepository;
+import com.example.androidbuttons.core.OverlayStateStore;
+
 /**
  * Foreground overlay service that shows a diagnostic strip on top of every screen.
  */
@@ -44,9 +48,12 @@ public class FloatingOverlayService extends Service {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final AtomicBoolean overlayAttached = new AtomicBoolean(false);
 
-    private SharedPreferences.OnSharedPreferenceChangeListener preferenceListener;
     private BroadcastReceiver scaleReceiver;
     private BroadcastReceiver positionReceiver;
+    private OverlaySettingsRepository overlaySettingsRepository;
+    private OverlaySettingsRepository.OverlaySettings overlaySettings;
+    private OverlaySettingsRepository.Listener overlaySettingsListener;
+    private OverlayStateStore overlayStateStore;
 
     private WindowManager windowManager;
     private View overlayView;
@@ -56,17 +63,16 @@ public class FloatingOverlayService extends Service {
     private OverlayStateAnimator stateAnimator;
     private OverlayGestureHandler gestureHandler;
 
-    private final StateBus.StripStateListener stripStateListener = state ->
-        mainHandler.post(() -> {
-            SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-            boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-            int shownState = stateAnimator != null ? stateAnimator.getCurrentState() : 0;
-            if (allowModification && shownState != 0) {
-                Log.d(TAG, "stripStateListener: ignore state=" + state + " (edit mode, current=" + shownState + ")");
-                return;
-            }
-            updateOverlayState(state);
-        });
+    private final OverlayStateStore.Listener stripStateListener = state ->
+            mainHandler.post(() -> {
+                boolean editMode = overlaySettings != null && overlaySettings.editAllowed;
+                int shownState = stateAnimator != null ? stateAnimator.getCurrentState() : 0;
+                if (editMode && shownState != 0) {
+                    Log.d(TAG, "stripStateListener: ignore state=" + state + " (edit mode, current=" + shownState + ")");
+                    return;
+                }
+                updateOverlayState(state);
+            });
 
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
@@ -82,6 +88,12 @@ public class FloatingOverlayService extends Service {
         super.onCreate();
         Log.i(TAG, "onCreate");
         OverlayNotificationHelper.ensureChannel(this);
+        AppGraph graph = AppGraph.get();
+        overlaySettingsRepository = graph.overlaySettings();
+        overlaySettings = overlaySettingsRepository.get();
+        overlaySettingsListener = settings -> mainHandler.post(() -> applyOverlaySettings(settings));
+        overlaySettingsRepository.addListener(overlaySettingsListener);
+        overlayStateStore = graph.overlayStates();
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         if (windowManager == null) {
             Log.e(TAG, "WindowManager unavailable");
@@ -92,25 +104,17 @@ public class FloatingOverlayService extends Service {
                     this,
                     windowManager,
                     stateAnimator,
+                    overlaySettingsRepository,
+                    overlayStateStore,
                     BASE_WIDTH_PX,
                     BASE_HEIGHT_PX
             );
         }
 
-        SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-        preferenceListener = (sharedPreferences, key) -> {
-            if (AppState.KEY_OVERLAY_ALLOW_MODIFICATION.equals(key)) {
-                boolean allow = sharedPreferences.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-                float targetAlpha = allow ? ALPHA_EDIT_MODE : ALPHA_NORMAL;
-                mainHandler.post(() -> setOverlayAlpha(targetAlpha));
-            }
-        };
-        prefs.registerOnSharedPreferenceChangeListener(preferenceListener);
-
         scaleReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                if (!"com.example.androidbuttons.APPLY_SCALE_NOW".equals(intent.getAction())) {
+                if (!AppContracts.ACTION_APPLY_SCALE.equals(intent.getAction())) {
                     return;
                 }
                 float scale = intent.getFloatExtra("scale", 1.0f);
@@ -120,12 +124,12 @@ public class FloatingOverlayService extends Service {
                 Log.d(TAG, "Scale applied immediately: " + scale);
             }
         };
-        registerReceiver(scaleReceiver, new IntentFilter("com.example.androidbuttons.APPLY_SCALE_NOW"));
+        registerReceiver(scaleReceiver, new IntentFilter(AppContracts.ACTION_APPLY_SCALE));
 
         positionReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                if (!"com.example.androidbuttons.APPLY_POSITION_NOW".equals(intent.getAction())) {
+                if (!AppContracts.ACTION_APPLY_POSITION.equals(intent.getAction())) {
                     return;
                 }
                 if (overlayParams == null || windowManager == null || overlayView == null) {
@@ -146,7 +150,7 @@ public class FloatingOverlayService extends Service {
                 }
             }
         };
-        registerReceiver(positionReceiver, new IntentFilter("com.example.androidbuttons.APPLY_POSITION_NOW"));
+        registerReceiver(positionReceiver, new IntentFilter(AppContracts.ACTION_APPLY_POSITION));
     }
 
     @Override
@@ -171,10 +175,8 @@ public class FloatingOverlayService extends Service {
         mainHandler.removeCallbacks(heartbeatRunnable);
         detachOverlay();
 
-        SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-        if (preferenceListener != null) {
-            prefs.unregisterOnSharedPreferenceChangeListener(preferenceListener);
-            preferenceListener = null;
+        if (overlaySettingsRepository != null && overlaySettingsListener != null) {
+            overlaySettingsRepository.removeListener(overlaySettingsListener);
         }
         if (scaleReceiver != null) {
             try {
@@ -235,24 +237,22 @@ public class FloatingOverlayService extends Service {
                 }
             }
 
-            SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-            boolean allow = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-            setOverlayAlpha(allow ? ALPHA_EDIT_MODE : ALPHA_NORMAL);
+            OverlaySettingsRepository.OverlaySettings settingsSnapshot = currentOverlaySettings();
+            setOverlayAlpha(settingsSnapshot.editAllowed ? ALPHA_EDIT_MODE : ALPHA_NORMAL);
 
-            int existingState = StateBus.getCurrentState();
+            int existingState = overlayStateStore.getCurrentState();
             if (existingState <= 0) {
-                StateBus.publishStripState(1);
+                overlayStateStore.publish(1);
                 existingState = 1;
             }
             updateOverlayState(existingState);
 
-            float currentScale = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
             if (gestureHandler != null) {
-                gestureHandler.applyScale(currentScale);
+                gestureHandler.applyScale(settingsSnapshot.scale);
             }
 
             refreshOverlayStatus();
-            StateBus.registerStateListener(stripStateListener);
+            overlayStateStore.addListener(stripStateListener);
             mainHandler.removeCallbacks(heartbeatRunnable);
             mainHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
         } catch (RuntimeException ex) {
@@ -275,7 +275,7 @@ public class FloatingOverlayService extends Service {
                 Log.w(TAG, "Overlay already removed", ex);
             }
         }
-        StateBus.unregisterStateListener(stripStateListener);
+        overlayStateStore.removeListener(stripStateListener);
         overlayAttached.set(false);
         overlayView = null;
         overlayParams = null;
@@ -313,35 +313,62 @@ public class FloatingOverlayService extends Service {
         stateAnimator.updateState(state);
     }
 
-    private WindowManager.LayoutParams buildDefaultLayoutParams() {
+    private void applyOverlaySettings(OverlaySettingsRepository.OverlaySettings settings) {
+        overlaySettings = settings;
+        float targetAlpha = settings.editAllowed ? ALPHA_EDIT_MODE : ALPHA_NORMAL;
+        setOverlayAlpha(targetAlpha);
+        if (overlayParams == null || windowManager == null || overlayView == null) {
+            return;
+        }
+        overlayParams.x = settings.x == 0 ? -computeLeftCompensation() : settings.x;
+        overlayParams.y = settings.y;
+        overlayParams.width = Math.round(BASE_WIDTH_PX * settings.scale);
+        overlayParams.height = Math.round(BASE_HEIGHT_PX * settings.scale);
+        try {
+            windowManager.updateViewLayout(overlayView, overlayParams);
+            if (gestureHandler != null) {
+                gestureHandler.applyScale(settings.scale);
+            }
+        } catch (Exception ex) {
+            Log.e(TAG, "Failed to apply overlay settings", ex);
+        }
+    }
+
+        private WindowManager.LayoutParams buildDefaultLayoutParams() {
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
+            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            : WindowManager.LayoutParams.TYPE_PHONE;
         int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                type,
-                flags,
-                PixelFormat.TRANSLUCENT
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            type,
+            flags,
+            PixelFormat.TRANSLUCENT
         );
         params.gravity = Gravity.TOP | Gravity.START;
         params.setTitle("OverlayProbe");
         params.windowAnimations = 0;
 
-        SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
-        float scale = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
-        params.width = Math.round(BASE_WIDTH_PX * scale);
-        params.height = Math.round(BASE_HEIGHT_PX * scale);
-
-        int savedX = prefs.getInt(AppState.KEY_OVERLAY_X, -computeLeftCompensation());
-        int savedY = prefs.getInt(AppState.KEY_OVERLAY_Y, 0);
+        OverlaySettingsRepository.OverlaySettings settingsSnapshot = currentOverlaySettings();
+        params.width = Math.round(BASE_WIDTH_PX * settingsSnapshot.scale);
+        params.height = Math.round(BASE_HEIGHT_PX * settingsSnapshot.scale);
+        int savedX = settingsSnapshot.x;
         params.x = savedX == 0 ? -computeLeftCompensation() : savedX;
-        params.y = savedY;
+        params.y = settingsSnapshot.y;
         return params;
-    }
+        }
+
+        private OverlaySettingsRepository.OverlaySettings currentOverlaySettings() {
+        if (overlaySettings != null) {
+            return overlaySettings;
+        }
+        return overlaySettingsRepository != null
+            ? overlaySettingsRepository.get()
+            : new OverlaySettingsRepository.OverlaySettings(-computeLeftCompensation(), 0, 1.0f, true);
+        }
 
     private boolean canDrawOverlays() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {

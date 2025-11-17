@@ -1,7 +1,6 @@
 package com.example.androidbuttons;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.os.Build;
 import android.util.Log;
 import android.view.MotionEvent;
@@ -9,6 +8,10 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
+
+import com.example.androidbuttons.core.AppContracts;
+import com.example.androidbuttons.core.OverlaySettingsRepository;
+import com.example.androidbuttons.core.OverlayStateStore;
 
 /**
  * Обработчик жестов для overlay: перемещение, pinch-to-zoom и выбор состояния.
@@ -22,6 +25,8 @@ final class OverlayGestureHandler implements View.OnTouchListener {
     private final Context context;
     private final WindowManager windowManager;
     private final OverlayStateAnimator stateAnimator;
+    private final OverlaySettingsRepository overlaySettingsRepository;
+    private final OverlayStateStore overlayStateStore;
     private final int baseWidthPx;
     private final int baseHeightPx;
     private final int[] tmpLocation = new int[2];
@@ -55,11 +60,15 @@ final class OverlayGestureHandler implements View.OnTouchListener {
     OverlayGestureHandler(Context context,
                           WindowManager windowManager,
                           OverlayStateAnimator stateAnimator,
+                          OverlaySettingsRepository overlaySettingsRepository,
+                          OverlayStateStore overlayStateStore,
                           int baseWidthPx,
                           int baseHeightPx) {
         this.context = context.getApplicationContext();
         this.windowManager = windowManager;
         this.stateAnimator = stateAnimator;
+        this.overlaySettingsRepository = overlaySettingsRepository;
+        this.overlayStateStore = overlayStateStore;
         this.baseWidthPx = baseWidthPx;
         this.baseHeightPx = baseHeightPx;
     }
@@ -97,8 +106,7 @@ final class OverlayGestureHandler implements View.OnTouchListener {
             return false;
         }
 
-        SharedPreferences prefs = context.getSharedPreferences(AppState.PREFS_NAME, Context.MODE_PRIVATE);
-        boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
+        boolean allowModification = overlaySettingsRepository.get().editAllowed;
 
         if (!allowModification) {
             if (event.getAction() == MotionEvent.ACTION_UP) {
@@ -141,7 +149,7 @@ final class OverlayGestureHandler implements View.OnTouchListener {
                         isScaling = true;
                         suppressMoveUntilUp = true;
                         initialDistance = getDistance(event);
-                        initialScale = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
+                        initialScale = overlaySettingsRepository.get().scale;
                         lastDistanceDuringScale = initialDistance;
                         smoothedScale = initialScale;
                         lastScaleTs = System.nanoTime();
@@ -254,9 +262,9 @@ final class OverlayGestureHandler implements View.OnTouchListener {
     }
 
     private void handleMoveUp(View touchView, MotionEvent event) {
-        SharedPreferences p = context.getSharedPreferences(AppState.PREFS_NAME, Context.MODE_PRIVATE);
-        int storedX = eliminateTinyOffset(p.getInt(AppState.KEY_OVERLAY_X, overlayParams.x));
-        int storedY = p.getInt(AppState.KEY_OVERLAY_Y, overlayParams.y);
+        OverlaySettingsRepository.OverlaySettings settings = overlaySettingsRepository.get();
+        int storedX = eliminateTinyOffset(settings.x);
+        int storedY = settings.y;
         boolean coordsChanged = (storedX != eliminateTinyOffset(overlayParams.x)) || (storedY != overlayParams.y);
         float totalDelta = Math.abs(getRawXCompat(touchView, event, 0) - initialTouchX)
             + Math.abs(getRawYCompat(touchView, event, 0) - initialTouchY);
@@ -290,8 +298,7 @@ final class OverlayGestureHandler implements View.OnTouchListener {
         int zone = (int) (y / (height / 5f)) + 1;
         if (zone < 1) zone = 1; else if (zone > 5) zone = 5;
 
-        SharedPreferences p = context.getSharedPreferences(AppState.PREFS_NAME, Context.MODE_PRIVATE);
-        boolean allowModification = p.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
+        boolean allowModification = overlaySettingsRepository.get().editAllowed;
         if (allowModification) {
             Log.d(TAG, "State tap ignored (edit mode) zone=" + zone);
             return true;
@@ -299,7 +306,7 @@ final class OverlayGestureHandler implements View.OnTouchListener {
         if (zone != stateAnimator.getCurrentState()) {
             Log.i(TAG, "Overlay selects state=" + zone);
             stateAnimator.updateState(zone);
-            StateBus.publishOverlaySelection(zone);
+            overlayStateStore.publishSelection(zone);
         }
         return true;
     }
@@ -368,15 +375,12 @@ final class OverlayGestureHandler implements View.OnTouchListener {
         float currentScale = (float) overlayParams.width / baseWidthPx;
         currentScale = Math.round(currentScale * 100f) / 100f;
 
-        SharedPreferences prefs = context.getSharedPreferences(AppState.PREFS_NAME, Context.MODE_PRIVATE);
-        prefs.edit()
-                .putFloat(AppState.KEY_OVERLAY_SCALE, currentScale)
-                .apply();
+        overlaySettingsRepository.setScale(currentScale);
 
         Log.d(TAG, "Overlay scale saved: " + currentScale + " (width=" + overlayParams.width + ")");
 
-        android.content.Intent intent = new android.content.Intent(AppState.ACTION_OVERLAY_UPDATED);
-        intent.putExtra(AppState.KEY_OVERLAY_SCALE, currentScale);
+        android.content.Intent intent = new android.content.Intent(AppContracts.ACTION_OVERLAY_UPDATED);
+        intent.putExtra(AppContracts.EXTRA_OVERLAY_SCALE, currentScale);
         context.sendBroadcast(intent);
     }
 
@@ -384,23 +388,19 @@ final class OverlayGestureHandler implements View.OnTouchListener {
         if (overlayParams == null) {
             return;
         }
-        SharedPreferences prefs = context.getSharedPreferences(AppState.PREFS_NAME, Context.MODE_PRIVATE);
         int logicalX = overlayParams.x;
         if (logicalX < 0 && Math.abs(logicalX) <= computeLeftCompensation() + 2) {
             logicalX = 0;
         }
         int clampedX = eliminateTinyOffset(logicalX);
 
-        prefs.edit()
-                .putInt(AppState.KEY_OVERLAY_X, clampedX)
-                .putInt(AppState.KEY_OVERLAY_Y, overlayParams.y)
-                .apply();
+        overlaySettingsRepository.setPosition(clampedX, overlayParams.y);
 
         Log.d(TAG, "Overlay position saved: x=" + clampedX + " y=" + overlayParams.y);
 
-        android.content.Intent intent = new android.content.Intent(AppState.ACTION_OVERLAY_UPDATED);
-        intent.putExtra(AppState.KEY_OVERLAY_X, clampedX);
-        intent.putExtra(AppState.KEY_OVERLAY_Y, overlayParams.y);
+        android.content.Intent intent = new android.content.Intent(AppContracts.ACTION_OVERLAY_UPDATED);
+        intent.putExtra(AppContracts.EXTRA_OVERLAY_X, clampedX);
+        intent.putExtra(AppContracts.EXTRA_OVERLAY_Y, overlayParams.y);
         context.sendBroadcast(intent);
     }
 
