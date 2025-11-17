@@ -117,7 +117,8 @@ public class FloatingOverlayService extends Service {
                 if (!AppContracts.ACTION_APPLY_SCALE.equals(intent.getAction())) {
                     return;
                 }
-                float scale = intent.getFloatExtra("scale", 1.0f);
+                float fallbackScale = overlaySettings != null ? overlaySettings.scale : 1.0f;
+                float scale = intent.getFloatExtra(AppContracts.EXTRA_OVERLAY_SCALE, fallbackScale);
                 if (gestureHandler != null) {
                     gestureHandler.applyScale(scale);
                 }
@@ -135,12 +136,12 @@ public class FloatingOverlayService extends Service {
                 if (overlayParams == null || windowManager == null || overlayView == null) {
                     return;
                 }
-                if (intent.hasExtra("x")) {
-                    int logicalX = intent.getIntExtra("x", overlayParams.x);
+                if (intent.hasExtra(AppContracts.EXTRA_OVERLAY_X)) {
+                    int logicalX = intent.getIntExtra(AppContracts.EXTRA_OVERLAY_X, overlayParams.x);
                     overlayParams.x = logicalX == 0 ? -computeLeftCompensation() : logicalX;
                 }
-                if (intent.hasExtra("y")) {
-                    overlayParams.y = intent.getIntExtra("y", overlayParams.y);
+                if (intent.hasExtra(AppContracts.EXTRA_OVERLAY_Y)) {
+                    overlayParams.y = intent.getIntExtra(AppContracts.EXTRA_OVERLAY_Y, overlayParams.y);
                 }
                 try {
                     windowManager.updateViewLayout(overlayView, overlayParams);
@@ -334,7 +335,7 @@ public class FloatingOverlayService extends Service {
         }
     }
 
-        private WindowManager.LayoutParams buildDefaultLayoutParams() {
+    private WindowManager.LayoutParams buildDefaultLayoutParams() {
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             : WindowManager.LayoutParams.TYPE_PHONE;
@@ -359,16 +360,16 @@ public class FloatingOverlayService extends Service {
         params.x = savedX == 0 ? -computeLeftCompensation() : savedX;
         params.y = settingsSnapshot.y;
         return params;
-        }
+    }
 
-        private OverlaySettingsRepository.OverlaySettings currentOverlaySettings() {
+    private OverlaySettingsRepository.OverlaySettings currentOverlaySettings() {
         if (overlaySettings != null) {
             return overlaySettings;
         }
         return overlaySettingsRepository != null
             ? overlaySettingsRepository.get()
             : new OverlaySettingsRepository.OverlaySettings(-computeLeftCompensation(), 0, 1.0f, true);
-        }
+    }
 
     private boolean canDrawOverlays() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {

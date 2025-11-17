@@ -1,12 +1,13 @@
 package com.example.androidbuttons;
 
 import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Looper;
+import android.os.IBinder;
 import android.provider.Settings;
 import android.util.Log;
 
@@ -23,8 +24,6 @@ import com.example.androidbuttons.core.OverlayStateStore;
 import com.example.androidbuttons.core.TcpConfigRepository;
 import com.example.androidbuttons.core.TcpStatusStore;
 
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends AppCompatActivity {
@@ -33,19 +32,15 @@ public class MainActivity extends AppCompatActivity {
     public static final String EXTRA_HIDE_AFTER_BOOT = "com.example.androidbuttons.EXTRA_HIDE_AFTER_BOOT";
 
     private static final String TAG_SERVICE = "MainActivitySvc";
-    private static final String DEFAULT_HOST = "192.168.2.6";
-    private static final int DEFAULT_PORT = 9000;
     private static final int REQUEST_OVERLAY_PERMISSION = 1001;
 
-    private TcpManager tcpManager;
+    private TcpService tcpService;
+    private boolean tcpServiceBound;
     private DataBuffer uiBuffer;
     private ActivityResultLauncher<Intent> settingsLauncher;
     private boolean overlayPermissionRequested = false;
     private int currentState = 0;
     private boolean settingsLaunched = false;
-    private java.util.Timer tcpStatusTimer;
-    private final ExecutorService bgExecutor = Executors.newSingleThreadExecutor();
-    private Boolean lastStatusConnected = null;
 
     private OverlaySettingsRepository overlaySettingsRepository;
     private OverlaySettingsRepository.OverlaySettings overlaySettings;
@@ -53,7 +48,6 @@ public class MainActivity extends AppCompatActivity {
     private TcpConfigRepository tcpConfigRepository;
     private TcpConfigRepository.TcpConfig currentTcpConfig;
     private final AtomicInteger selectedLoco = new AtomicInteger(1);
-    private TcpStatusStore tcpStatusStore;
     private ConsoleLogRepository consoleLogRepository;
 
     private final OverlayStateStore.SelectionListener overlaySelectionListener = state ->
@@ -63,7 +57,29 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> overlaySettings = settings);
 
     private final TcpConfigRepository.Listener tcpConfigListener = config ->
-            runOnUiThread(() -> applyTcpConfig(config, true));
+            runOnUiThread(() -> applyTcpConfig(config));
+
+    private final TcpService.TcpDataListener tcpDataListener = line ->
+            runOnUiThread(() -> handleTcpPayload(line));
+
+    private final android.content.ServiceConnection tcpServiceConnection = new android.content.ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            TcpService.LocalBinder binder = (TcpService.LocalBinder) service;
+            tcpService = binder.getService();
+            tcpServiceBound = true;
+            tcpService.setTcpDataListener(tcpDataListener);
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            if (tcpService != null) {
+                tcpService.setTcpDataListener(null);
+            }
+            tcpServiceBound = false;
+            tcpService = null;
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -86,7 +102,6 @@ public class MainActivity extends AppCompatActivity {
         tcpConfigRepository = graph.tcpConfig();
         currentTcpConfig = tcpConfigRepository.get();
         selectedLoco.set(currentTcpConfig.selectedLoco);
-        tcpStatusStore = graph.tcpStatuses();
         consoleLogRepository = graph.consoleLog();
 
         overlaySettingsRepository.addListener(overlaySettingsListener);
@@ -94,35 +109,19 @@ public class MainActivity extends AppCompatActivity {
 
         uiBuffer = new DataBuffer(256, consoleLogRepository::append);
 
-        tcpManager = new TcpManager(
-                () -> runOnUiThread(() -> tcpStatusStore.update(TcpStatusStore.TcpStatus.connecting())),
-                () -> runOnUiThread(() -> tcpStatusStore.update(TcpStatusStore.TcpStatus.disconnected())),
-                data -> handleTcpPayload(data, selectedLoco.get()),
-                error -> {
-                    // suppress UI noise
-                },
-                status -> runOnUiThread(() -> handleTcpStatus(status))
-        );
-
-        applyTcpConfig(currentTcpConfig, true);
+        applyTcpConfig(currentTcpConfig);
+        startTcpService();
 
         updateStateFromExternal(1);
         overlayStateStore.publishSelection(1);
         Log.d(AppContracts.LOG_TAG_MAIN, "Initial state set to 1 (green)");
-
-        tcpStatusTimer = new java.util.Timer();
-        tcpStatusTimer.scheduleAtFixedRate(new java.util.TimerTask() {
-            @Override
-            public void run() {
-                performTcpHealthCheck("tick");
-            }
-        }, 1000, 1000);
     }
 
-    private void handleTcpPayload(String data, int locoTarget) {
+    private void handleTcpPayload(String data) {
         if (data == null || data.isEmpty()) {
             return;
         }
+        int locoTarget = selectedLoco.get();
         String[] lines = data.split("\n");
         for (String line : lines) {
             if (line == null) {
@@ -153,36 +152,11 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void performTcpHealthCheck(String phase) {
-        if (Looper.getMainLooper().isCurrentThread()) {
-            runOffUi(() -> performTcpHealthCheck(phase + "_bg"));
-            return;
-        }
-        boolean connectionAlive = tcpManager.checkConnectionAlive();
-        TcpStatusStore.TcpStatus currentStatus = tcpStatusStore.get();
-        if (currentStatus.reachable != connectionAlive) {
-            tcpStatusStore.update(currentStatus.withReachable(connectionAlive));
-        }
-    }
-
-    private void runOffUi(Runnable r) {
-        bgExecutor.execute(r);
-    }
-
     @Override
     protected void onDestroy() {
         super.onDestroy();
-
-        if (tcpStatusTimer != null) {
-            tcpStatusTimer.cancel();
-            tcpStatusTimer = null;
-        }
-
-        if (tcpManager != null) {
-            tcpManager.shutdown();
-        }
-
-        bgExecutor.shutdownNow();
+        unbindTcpService();
+        stopTcpService();
         uiBuffer.close();
 
         overlaySettingsRepository.removeListener(overlaySettingsListener);
@@ -197,6 +171,18 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        bindTcpService();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        unbindTcpService();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
 
@@ -205,7 +191,7 @@ public class MainActivity extends AppCompatActivity {
         if (currentState > 0) {
             overlayStateStore.publish(currentState);
         }
-        applyTcpConfig(currentTcpConfig, false);
+        applyTcpConfig(currentTcpConfig);
         processLaunchFlags(getIntent(), false);
     }
 
@@ -340,6 +326,56 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void startTcpService() {
+        try {
+            Context appCtx = getApplicationContext();
+            Intent svcIntent = new Intent(appCtx, TcpService.class);
+            appCtx.startService(svcIntent);
+            Log.i(TAG_SERVICE, "TcpService start requested");
+        } catch (Exception ex) {
+            Log.e(TAG_SERVICE, "Failed to start TcpService", ex);
+        }
+    }
+
+    private void stopTcpService() {
+        try {
+            Intent svcIntent = new Intent(this, TcpService.class);
+            stopService(svcIntent);
+            Log.i(TAG_SERVICE, "TcpService stop requested");
+        } catch (Exception ex) {
+            Log.w(TAG_SERVICE, "Failed to stop TcpService", ex);
+        }
+    }
+
+    private void bindTcpService() {
+        if (tcpServiceBound) {
+            return;
+        }
+        try {
+            Intent intent = new Intent(this, TcpService.class);
+            boolean bound = bindService(intent, tcpServiceConnection, Context.BIND_AUTO_CREATE);
+            tcpServiceBound = bound;
+            Log.i(TAG_SERVICE, "bindTcpService result=" + bound);
+        } catch (Exception ex) {
+            tcpServiceBound = false;
+            Log.e(TAG_SERVICE, "Failed to bind TcpService", ex);
+        }
+    }
+
+    private void unbindTcpService() {
+        if (!tcpServiceBound) {
+            return;
+        }
+        try {
+            unbindService(tcpServiceConnection);
+            Log.i(TAG_SERVICE, "TcpService unbound");
+        } catch (Exception ex) {
+            Log.w(TAG_SERVICE, "unbindTcpService failed", ex);
+        } finally {
+            tcpServiceBound = false;
+        }
+    }
+
     private boolean canDrawOverlays() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return true;
@@ -384,48 +420,21 @@ public class MainActivity extends AppCompatActivity {
     private void sendExclusiveRelays(int active) {
         int loco = selectedLoco.get();
         int state = Math.max(1, Math.min(5, active));
-        tcpManager.sendControl(loco, state);
-        if (tcpManager.connectionActive()) {
+        boolean queued = tcpService != null && tcpService.sendControl(loco, state);
+        if (queued) {
             uiBuffer.offer("[#TCP_TX#]" + "Tx: loco" + loco + " -> state" + state + "\n");
         }
     }
 
-    private void applyTcpConfig(@Nullable TcpConfigRepository.TcpConfig config, boolean restart) {
+    private void applyTcpConfig(@Nullable TcpConfigRepository.TcpConfig config) {
         if (config == null) {
             return;
         }
         currentTcpConfig = config;
         selectedLoco.set(config.selectedLoco);
-        String host = config.host != null ? config.host.trim() : "";
-        if (host.isEmpty()) {
-            host = DEFAULT_HOST;
-        }
-        int port = config.port <= 0 ? DEFAULT_PORT : config.port;
-        if (restart) {
-            tcpManager.disableAutoConnect();
-            tcpManager.disconnect();
-            tcpManager.enableAutoConnect(host, port);
-        } else {
-            tcpManager.updateTarget(host, port);
-        }
     }
 
     private boolean isOverlayInEditMode() {
         return overlaySettings != null && overlaySettings.editAllowed;
-    }
-
-    private void handleTcpStatus(String status) {
-        boolean connected = "connected".equals(status);
-        tcpStatusStore.update(connected
-                ? TcpStatusStore.TcpStatus.connected()
-                : TcpStatusStore.TcpStatus.disconnected());
-        if (lastStatusConnected == null || !lastStatusConnected.equals(connected)) {
-            lastStatusConnected = connected;
-            if (connected) {
-                uiBuffer.offer("[#TCP_STATUS#]TCP connected\n");
-            } else {
-                uiBuffer.offer("[#TCP_STATUS#]TCP disconnected\n");
-            }
-        }
     }
 }

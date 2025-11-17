@@ -56,6 +56,10 @@
             android:name=".FloatingOverlayService"
             android:exported="false" />
 
+        <service
+            android:name=".TcpService"
+            android:exported="false" />
+
         <!-- Overlay сервис удалён -->
     </application>
 
