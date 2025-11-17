@@ -161,16 +161,20 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void performTcpHealthCheck(String phase) {
+        // Никогда не выполняем работу на UI-потоке
         if (android.os.Looper.getMainLooper().isCurrentThread()) {
             runOffUi(() -> performTcpHealthCheck(phase + "_bg"));
             return;
         }
+
+        // Пассивно проверяем, живо ли текущее соединение
         boolean connectionAlive = tcpManager.checkConnectionAlive();
-        boolean endpointReachable = connectionAlive || tcpManager.isEndpointReachable(600);
-        // Обновляем только флаги, без принудительного разрыва и переподключения
+
+        // Обновляем только флаги, без дополнительных TCP-подключений
         AppState.tcpConnected = connectionAlive;
-        AppState.tcpReachable = endpointReachable;
+        AppState.tcpReachable = connectionAlive;
     }
+
 
     private void runOffUi(Runnable r) {
         bgExecutor.execute(r);
