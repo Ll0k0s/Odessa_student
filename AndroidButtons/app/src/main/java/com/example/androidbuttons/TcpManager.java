@@ -7,26 +7,17 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.Locale;
-import java.util.function.Consumer;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 // Менеджер TCP-подключения к ESP/железу.
 // Держит авто-подключение, сбор/разбор кадров и не блокирует UI.
-final class TcpManager {
+class TcpManager {
 
-    // Колбэки для внешнего кода (сейчас не используются, но оставлены на будущее)
-    interface Callback {
-        void onStart();
-        void onStop();
-        void onData(String data);
-        void onError(String message);
+    // Лёгкий интерфейс для колбэков со строкой (аналог Consumer<String>, но без API 24)
+    interface StringCallback {
+        void accept(String s);
     }
 
     // Колбэк старта поиска/подключения
@@ -34,44 +25,34 @@ final class TcpManager {
     // Колбэк остановки поиска/подключения
     private final Runnable onStop;
     // Колбэк входящих строк (разобранные кадры и служебные сообщения)
-    private final Consumer<String> onData;
+    private final StringCallback onData;
     // Колбэк ошибок
-    private final Consumer<String> onError;
+    private final StringCallback onError;
     // Колбэк смены статуса подключения ("connected"/"disconnected")
-    private final Consumer<String> onStatus;
+    private final StringCallback onStatus;
 
     // Поток для подключения и чтения входящих данных
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     // Отдельный поток для записи, чтобы чтение не блокировало отправку
     private final ExecutorService writer = Executors.newSingleThreadExecutor();
-    // Планировщик для авто-подключения
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-
     private Future<?> task;
     private Socket socket;
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private final AtomicBoolean destroyed = new AtomicBoolean(false);
 
     // Допустимые диапазоны номера локомотива и состояния
     private static final int LOCO_MIN = 1;
     private static final int LOCO_MAX = 8;
     private static final int STATE_MIN = 1;
     private static final int STATE_MAX = 6;
-
-    // Параметры авто-подключения/таймаутов
     private static final long AUTO_RETRY_DELAY_MS = 1000;
     private static final long AUTO_RETRY_MAX_DELAY_MS = 30000;
     private static final int CONNECT_TIMEOUT_MS = 4000;
     private static final int READ_TIMEOUT_MS = 4000;
 
-    // Параметры протокола
-    private static final byte FRAME_START = 0x7E;
-    private static final int MAX_FRAME_LENGTH = 4096;
-
-    // Авто-подключение
+    // Планировщик для авто-подключения
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> autoTask;
     private volatile boolean autoMode = false;
-    private volatile boolean autoPaused = false;
     private volatile String targetHost = null;
     private volatile int targetPort = -1;
     private volatile boolean connecting = false;
@@ -89,18 +70,18 @@ final class TcpManager {
         if (searching == s) return;
         searching = s;
         if (s) {
-            onStart.run();
+            if (onStart != null) onStart.run();
         } else {
-            onStop.run();
+            if (onStop != null) onStop.run();
         }
     }
 
     // Инициализация менеджера с набором колбэков
     TcpManager(Runnable onStart,
                Runnable onStop,
-               Consumer<String> onData,
-               Consumer<String> onError,
-               Consumer<String> onStatus) {
+               StringCallback onData,
+               StringCallback onError,
+               StringCallback onStatus) {
         this.onStart = onStart;
         this.onStop = onStop;
         this.onData = onData;
@@ -111,27 +92,22 @@ final class TcpManager {
     // Запрос ручного подключения к указанному хосту/порту
     // Валидация параметров, закрытие старого сокета и запуск фонового потока.
     synchronized void connect(String host, int port) {
-        if (destroyed.get()) return;
         if (host == null || host.trim().isEmpty() || port < 1 || port > 65535) return;
         if (connecting) return;
 
         // Проверяем, что мы не уже подключены к тому же адресу
         if (isConnected()) {
             try {
-                String curHost = socket.getInetAddress() != null
-                        ? socket.getInetAddress().getHostAddress()
-                        : null;
+                String curHost = socket.getInetAddress() != null ? socket.getInetAddress().getHostAddress() : null;
                 int curPort = socket.getPort();
                 if (curHost != null && curHost.equals(host) && curPort == port) {
                     System.out.println("[TCP][CONNECT] skip (already connected) host=" + host + " port=" + port);
                     return;
                 }
-            } catch (Throwable ignored) {
-            }
+            } catch (Throwable ignored) {}
             // Адрес/порт изменились — закрываем старый сокет
-            System.out.println("[TCP][CONNECT] host/port changed oldHost=" +
-                    safeHost() + " oldPort=" + safePort() +
-                    " newHost=" + host + " newPort=" + port);
+            System.out.println("[TCP][CONNECT] host/port changed oldHost=" + socket.getInetAddress().getHostAddress()
+                    + " oldPort=" + socket.getPort() + " newHost=" + host + " newPort=" + port);
             disconnect();
         }
 
@@ -144,94 +120,78 @@ final class TcpManager {
         targetHost = host;
         targetPort = port;
 
-        if (executor.isShutdown()) {
-            // Менеджер уже выключен, ничего не делаем
-            connecting = false;
-            running.set(false);
-            setSearching(false);
-            return;
-        }
-
         task = executor.submit(() -> {
-            boolean normalClose = false;
-            try {
-                // Создаём и подключаем новый сокет
-                Socket newSock = new Socket();
-                newSock.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
-                newSock.setSoTimeout(READ_TIMEOUT_MS);
-                newSock.setTcpNoDelay(true);
-                synchronized (this) {
-                    socket = newSock;
-                }
+                boolean normalClose = false;
+                try {
+                    // Создаём и подключаем новый сокет
+                    Socket newSock = new Socket();
+                    newSock.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+                    newSock.setSoTimeout(READ_TIMEOUT_MS);
+                    newSock.setTcpNoDelay(true);
+                    synchronized (TcpManager.this) { socket = newSock; }
 
-                setSearching(false);
-                if (onStatus != null) onStatus.accept("connected");
-                if (onData != null) onData.accept("[TCP] Connected to " + host + ":" + port + "\n");
-                System.out.println("[TCP][CONNECT] success host=" + host + " port=" + port);
-                noteAutoSuccess();
+                    setSearching(false);
+                    if (onStatus != null) onStatus.accept("connected");
+                    if (onData != null) onData.accept("[TCP] Connected to " + host + ":" + port + "\n");
+                    System.out.println("[TCP][CONNECT] success host=" + host + " port=" + port);
+                    noteAutoSuccess();
 
-                // Читаем поток и передаём байты в парсер фреймов
-                InputStream in = new BufferedInputStream(newSock.getInputStream());
-                byte[] buf = new byte[512];
-
-                while (running.get() && !destroyed.get()) {
-                    try {
-                        int n = in.read(buf);
-                        if (n == -1) {
-                            normalClose = true;
-                            break;
-                        }
-                        if (n > 0) {
-                            try {
-                                System.out.println("TCP RX (" + n + " bytes): " + toHex(buf, 0, n));
-                            } catch (Throwable ignored) {
+                    // Читаем поток и передаём байты в парсер фреймов
+                    InputStream in = new BufferedInputStream(newSock.getInputStream());
+                    byte[] buf = new byte[512];
+                    while (running.get()) {
+                        try {
+                            int n = in.read(buf);
+                            if (n == -1) {
+                                normalClose = true;
+                                break;
                             }
-                            feedRx(buf, 0, n);
-                            drainFrames();
+                            if (n > 0) {
+                                try {
+                                    System.out.println("TCP RX (" + n + " bytes): " + toHex(buf, 0, n));
+                                } catch (Throwable ignored) {}
+                                feedRx(buf, n);
+                                drainFrames();
+                            }
+                        } catch (SocketTimeoutException timeout) {
+                            if (!running.get()) break;
                         }
-                    } catch (SocketTimeoutException timeout) {
-                        if (!running.get() || destroyed.get()) break;
                     }
-                }
-            } catch (IOException e) {
-                System.out.println("[TCP][CONNECT] error host=" + host + " port=" + port + " msg=" + e.getMessage());
-                if (onData != null) onData.accept("[TCP] Connection error: " + e.getMessage() + "\n");
-                if (onError != null) onError.accept(e.getMessage());
-            } finally {
-                // Любое завершение цикла чтения приводит к закрытию сокета и обновлению статуса
-                closeQuietly();
-                running.set(false);
-                connecting = false;
-
-                boolean manual = manualDisconnectRequested;
-                manualDisconnectRequested = false;
-
-                if (autoMode && !destroyed.get()) {
-                    if (manual) {
-                        noteManualDisconnect();
-                    } else if (normalClose) {
-                        noteGracefulClose();
-                    } else {
-                        noteAutoFailure();
+                } catch (IOException e) {
+                    System.out.println("[TCP][CONNECT] error host=" + host + " port=" + port + " msg=" + e.getMessage());
+                    if (onData != null) onData.accept("[TCP] Connection error: " + e.getMessage() + "\n");
+                    if (onError != null) onError.accept(e.getMessage());
+                } finally {
+                    // Любое завершение цикла чтения приводит к закрытию сокета и обновлению статуса
+                    closeQuietly();
+                    running.set(false);
+                    connecting = false;
+                    boolean manual = manualDisconnectRequested;
+                    manualDisconnectRequested = false;
+                    if (autoMode) {
+                        if (manual) {
+                            noteManualDisconnect();
+                        } else if (normalClose) {
+                            noteGracefulClose();
+                        } else {
+                            noteAutoFailure();
+                        }
                     }
+                    if (onStatus != null) onStatus.accept("disconnected");
+                    if (onData != null) {
+                        onData.accept("[TCP] Disconnected from " + targetHost + ":" + targetPort
+                                + (normalClose ? " (normal)" : " (error)") + "\n");
+                    }
+                    System.out.println("[TCP][DISCONNECT] closed host=" + targetHost + " port=" + targetPort
+                            + " normalClose=" + normalClose);
                 }
-
-                if (onStatus != null) onStatus.accept("disconnected");
-                if (onData != null) {
-                    String hostStr = targetHost != null ? targetHost : host;
-                    int portVal = targetPort > 0 ? targetPort : port;
-                    onData.accept("[TCP] Disconnected from " + hostStr + ":" + portVal +
-                            (normalClose ? " (normal)" : " (error)") + "\n");
-                }
-                System.out.println("[TCP][DISCONNECT] closed host=" + targetHost +
-                        " port=" + targetPort + " normalClose=" + normalClose);
-            }
         });
     }
 
     // Ручное отключение клиента и остановка фонового потока чтения
     synchronized void disconnect() {
-        System.out.println("[TCP][DISCONNECT] manual request host=" + targetHost + " port=" + targetPort + " connected=" + isConnected());
+        System.out.println("[TCP][DISCONNECT] manual request host=" + targetHost + " port=" + targetPort
+                + " connected=" + isConnected());
         if (isConnected() && onData != null) {
             onData.accept("[TCP] Manual disconnect from " + targetHost + ":" + targetPort + "\n");
         }
@@ -247,14 +207,10 @@ final class TcpManager {
         if (onStatus != null) onStatus.accept("disconnected");
     }
 
-
     // Тихое закрытие сокета без лишних исключений в логах
     private synchronized void closeQuietly() {
         if (socket != null) {
-            try {
-                socket.close();
-            } catch (IOException ignored) {
-            }
+            try { socket.close(); } catch (IOException ignored) {}
             socket = null;
         }
     }
@@ -273,88 +229,44 @@ final class TcpManager {
         return !socket.isInputShutdown() && !socket.isOutputShutdown();
     }
 
-    // Проверка доступности конечной точки host:port отдельным коротким подключением
-    boolean isEndpointReachable(int timeoutMs) {
-        if (destroyed.get()) return false;
-        if (isConnected()) {
-            return true;
-        }
-        String host = targetHost;
-        int port = targetPort;
-        if (host == null || host.trim().isEmpty() || port < 1 || port > 65535) {
-            return false;
-        }
-
-        try (Socket probe = new Socket()) {
-            probe.connect(new InetSocketAddress(host, port), Math.max(100, timeoutMs));
-            return true;
-        } catch (IOException e) {
-            return false;
-        }
-    }
-
-    // Текущий целевой host (для UI/логов)
-    synchronized String getTargetHost() {
-        return targetHost;
-    }
-
-    // Текущий целевой port (для UI/логов)
-    synchronized int getTargetPort() {
-        return targetPort;
-    }
-
     // Упрощённый флаг активности соединения
-    synchronized boolean connectionActive() {
-        return isConnected();
-    }
+    synchronized boolean connectionActive() { return isConnected(); }
 
     // Сборка кадра управления: 0x7E | loco(1) | len(2 BE) | data(N) | CRC8
     byte[] buildControlFrame(int loco, int state) {
         int l = Math.max(LOCO_MIN, Math.min(LOCO_MAX, loco));
         int st = Math.max(STATE_MIN, Math.min(STATE_MAX, state));
+        final byte START = 0x7E;
 
-        // Пока payload = один байт состояния
-        byte[] payload = new byte[]{(byte) st};
+        // Пока payload = один байт состояния (резерв для будущих полей)
+        byte[] payload = new byte[1];
+        payload[0] = (byte) st;
         int len = payload.length;
-
-        byte lenHi = (byte) ((len >> 8) & 0xFF);
-        byte lenLo = (byte) (len & 0xFF);
 
         byte[] crcBuf = new byte[3 + len];
         crcBuf[0] = (byte) (l & 0xFF);
-        crcBuf[1] = lenHi;
-        crcBuf[2] = lenLo;
-        if (len > 0) System.arraycopy(payload, 0, crcBuf, 3, len);
+        crcBuf[1] = 0;            // lenHi — всегда 0 при текущей длине payload
+        crcBuf[2] = (byte) len;   // lenLo
+        System.arraycopy(payload, 0, crcBuf, 3, len);
 
         byte crc = crc8(crcBuf, 0, crcBuf.length);
 
         byte[] frame = new byte[1 + crcBuf.length + 1];
-        frame[0] = FRAME_START;
+        frame[0] = START;
         System.arraycopy(crcBuf, 0, frame, 1, crcBuf.length);
         frame[frame.length - 1] = crc;
         return frame;
     }
 
-    // Утилита: отдаёт собранный кадр в hex-виде для логов
-    String controlFrameHex(int loco, int state) {
-        byte[] frame = buildControlFrame(loco, state);
-        return toHex(frame, 0, frame.length);
-    }
-
     // Асинхронная отправка управляющего кадра
     // Без повторов, ошибки только логируем через onError.
     void sendControl(int loco, int state) {
-        if (destroyed.get()) return;
         if (!isConnected()) return;
-        if (writer.isShutdown()) return;
-
         final byte[] frame = buildControlFrame(loco, state);
         writer.submit(() -> {
             try {
                 Socket sck;
-                synchronized (this) {
-                    sck = socket;
-                }
+                synchronized (TcpManager.this) { sck = socket; }
                 if (sck == null || sck.isClosed() || !sck.isConnected()) return;
                 sck.getOutputStream().write(frame);
                 sck.getOutputStream().flush();
@@ -366,14 +278,11 @@ final class TcpManager {
         });
     }
 
-    // Включение авто-подключения с периодом 1 секунду
+    // Включение авто-подключения с периодом 1 секунда
     void enableAutoConnect(String host, int port) {
-        if (destroyed.get()) return;
-
         targetHost = host;
         targetPort = port;
         autoMode = true;
-        autoPaused = false;
         consecutiveFailures.set(0);
         nextAutoAttemptAt = 0L;
         manualDisconnectRequested = false;
@@ -385,13 +294,9 @@ final class TcpManager {
 
         System.out.println("[TCP][AUTO] enable host=" + host + " port=" + port);
 
-        if (scheduler.isShutdown()) {
-            return;
-        }
-
         autoTask = scheduler.scheduleWithFixedDelay(() -> {
             try {
-                if (!autoMode || autoPaused || destroyed.get()) {
+                if (!autoMode) {
                     setSearching(false);
                     return;
                 }
@@ -423,7 +328,6 @@ final class TcpManager {
     // Полное выключение авто-подключения
     void disableAutoConnect() {
         autoMode = false;
-        autoPaused = false;
         if (autoTask != null) {
             autoTask.cancel(false);
             autoTask = null;
@@ -435,23 +339,16 @@ final class TcpManager {
         System.out.println("[TCP][AUTO] disabled host=" + targetHost + " port=" + targetPort);
     }
 
-    // Пауза/возобновление авто-подключения (например, при ручной паузе в UI)
-    void pauseAuto(boolean paused) {
-        autoPaused = paused;
-        if (paused) setSearching(false);
-        System.out.println("[TCP][AUTO] pause=" + paused + " host=" + targetHost + " port=" + targetPort);
-    }
-
     // Обновление целевого host/port без немедленного переподключения
     void updateTarget(String host, int port) {
-        targetHost = host;
-        targetPort = port;
+        this.targetHost = host;
+        this.targetPort = port;
     }
 
     // Добавление новых байтов в буфер приёма
-    private void feedRx(byte[] src, int off, int len) {
+    private void feedRx(byte[] src, int len) {
         ensureCapacity(rxSize + len);
-        System.arraycopy(src, off, rxBuf, rxSize, len);
+        System.arraycopy(src, 0, rxBuf, rxSize, len);
         rxSize += len;
     }
 
@@ -467,10 +364,11 @@ final class TcpManager {
 
     // Разбор буфера на кадры протокола: 0x7E | loco(1) | len(2 BE) | data(N) | CRC8
     private void drainFrames() {
+        final byte START = 0x7E;
         int i = 0;
         while (true) {
             // Ищем стартовый байт
-            while (i < rxSize && rxBuf[i] != FRAME_START) i++;
+            while (i < rxSize && rxBuf[i] != START) i++;
             if (i >= rxSize) {
                 rxSize = 0;
                 return;
@@ -491,7 +389,7 @@ final class TcpManager {
             int total = 1 + 1 + 2 + len + 1;
 
             // Защита от мусорной длины
-            if (len < 0 || len > MAX_FRAME_LENGTH) {
+            if (len > 4096) {
                 consume(1);
                 continue;
             }
@@ -515,8 +413,7 @@ final class TcpManager {
                 safeOnData(line);
             } else {
                 String line = String.format(Locale.US,
-                        "cmd=0x%02X len=%d data=%s\n",
-                        loco, len, toHex(rxBuf, 4, len));
+                        "cmd=0x%02X len=%d data=%s\n", loco, len, toHex(rxBuf, 4, len));
                 safeOnData(line);
             }
 
@@ -539,14 +436,14 @@ final class TcpManager {
     private void safeOnData(String s) {
         try {
             if (onData != null) onData.accept(s);
-        } catch (Throwable ignored) {
-        }
+        } catch (Throwable ignored) {}
     }
 
     // Подсчёт CRC8 с полиномом 0x31 (как на стороне ESP)
     private static byte crc8(byte[] buf, int off, int len) {
         int crc = 0x00;
-        for (int i = off; i < off + len; i++) {
+        int end = off + len;
+        for (int i = off; i < end; i++) {
             crc ^= (buf[i] & 0xFF);
             for (int b = 0; b < 8; b++) {
                 if ((crc & 0x80) != 0) {
@@ -562,16 +459,16 @@ final class TcpManager {
     // Перевод байтов в строку вида "7E 01 00 01 FF"
     private static String toHex(byte[] buf, int off, int len) {
         StringBuilder sb = new StringBuilder(len * 3);
-        for (int i = 0; i < len; i++) {
-            sb.append(String.format(Locale.US, "%02X", buf[off + i] & 0xFF));
-            if (i + 1 < len) sb.append(' ');
+        int end = off + len;
+        for (int i = off; i < end; i++) {
+            sb.append(String.format(Locale.US, "%02X", buf[i] & 0xFF));
+            if (i + 1 < end) sb.append(' ');
         }
         return sb.toString();
     }
 
     private long computeBackoffDelayMs(int attempts) {
-        long shifted = AUTO_RETRY_DELAY_MS *
-                (1L << Math.min(5, Math.max(0, attempts - 1)));
+        long shifted = AUTO_RETRY_DELAY_MS * (1L << Math.min(5, Math.max(0, attempts - 1)));
         return Math.min(AUTO_RETRY_MAX_DELAY_MS, shifted);
     }
 
@@ -582,64 +479,17 @@ final class TcpManager {
 
     private void noteAutoFailure() {
         int attempts = consecutiveFailures.incrementAndGet();
-        nextAutoAttemptAt =
-                System.currentTimeMillis() + computeBackoffDelayMs(attempts);
+        nextAutoAttemptAt = System.currentTimeMillis() + computeBackoffDelayMs(attempts);
     }
 
     private void noteGracefulClose() {
         consecutiveFailures.set(0);
-        nextAutoAttemptAt =
-                System.currentTimeMillis() + AUTO_RETRY_DELAY_MS;
+        nextAutoAttemptAt = System.currentTimeMillis() + AUTO_RETRY_DELAY_MS;
     }
 
     private void noteManualDisconnect() {
         consecutiveFailures.set(0);
-        nextAutoAttemptAt =
-                System.currentTimeMillis() + AUTO_RETRY_DELAY_MS;
-    }
-
-    private String safeHost() {
-        try {
-            return socket != null && socket.getInetAddress() != null
-                    ? socket.getInetAddress().getHostAddress()
-                    : "null";
-        } catch (Throwable t) {
-            return "error";
-        }
-    }
-
-    private int safePort() {
-        try {
-            return socket != null ? socket.getPort() : -1;
-        } catch (Throwable t) {
-            return -1;
-        }
-    }
-
-    // Отправка серверу уведомления о штатном завершении клиента
-    void sendClientShutdownNotice() {
-        if (!isConnected()) {
-            return;
-        }
-
-        Socket sck;
-        synchronized (this) {
-            sck = socket;
-        }
-        if (sck == null || sck.isClosed() || !sck.isConnected()) {
-            return;
-        }
-
-        try {
-            // Текстовое уведомление для сервера
-            String msg = "[CLIENT] DISCONNECT\n";
-            sck.getOutputStream().write(msg.getBytes("UTF-8"));
-            sck.getOutputStream().flush();
-            System.out.println("[TCP][GOODBYE] disconnect notice sent");
-        } catch (Exception e) {
-            // Если не получилось — просто логируем и продолжаем гаситься
-            System.out.println("[TCP][GOODBYE] send failed: " + e.getMessage());
-        }
+        nextAutoAttemptAt = System.currentTimeMillis() + AUTO_RETRY_DELAY_MS;
     }
 
     // Полное завершение менеджера и фоновых потоков
@@ -660,6 +510,4 @@ final class TcpManager {
         connecting = false;
         searching = false;
     }
-
-
 }
