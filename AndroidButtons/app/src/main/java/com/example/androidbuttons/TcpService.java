@@ -6,6 +6,7 @@ import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import androidx.annotation.Nullable;
 
@@ -30,6 +31,9 @@ public class TcpService extends Service {
 
     private static final long HEALTH_INTERVAL_MS = 1000L;
 
+    private static final long TCP_INFO_SUPPRESS_MS = 15_000L;
+    private static final long TCP_ERROR_SUPPRESS_MS = 15_000L;
+
     private final IBinder binder = new LocalBinder();
     private Handler mainHandler;
     private TcpManager tcpManager;
@@ -48,6 +52,11 @@ public class TcpService extends Service {
     private int activePort;
     private final AtomicInteger selectedState = new AtomicInteger(ProtocolConstraints.STATE_MIN);
     private final AtomicInteger selectedLoco = new AtomicInteger(ProtocolConstraints.LOCO_MIN);
+    private String lastTcpInfoLine;
+    private long lastTcpInfoAt;
+    private String lastStatusLogged;
+    private String lastErrorLogged;
+    private long lastErrorAt;
 
     public class LocalBinder extends Binder {
         public TcpService getService() {
@@ -58,6 +67,11 @@ public class TcpService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        OverlayNotificationHelper.ensureChannel(this);
+        startForeground(
+            OverlayNotificationHelper.getNotificationId(),
+            OverlayNotificationHelper.buildForegroundNotification(this)
+        );
         mainHandler = new Handler(Looper.getMainLooper());
         AppGraph graph = AppGraph.get();
         tcpConfigRepository = graph.tcpConfig();
@@ -116,6 +130,7 @@ public class TcpService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        stopForeground(true);
         if (healthRunnable != null) {
             mainHandler.removeCallbacks(healthRunnable);
         }
@@ -150,21 +165,62 @@ public class TcpService extends Service {
                 () -> postStatus(TcpState.CONNECTING),
                 () -> postStatus(TcpState.DISCONNECTED),
                 this::dispatchTcpData,
-                error -> consoleLogRepository.append("[#TCP_ERR#]" + error + "\n"),
+                this::appendTcpError,
                 status -> {
                     if ("connected".equals(status)) {
                         postStatus(TcpState.CONNECTED);
                     } else {
                         postStatus(TcpState.DISCONNECTED);
                     }
-                    consoleLogRepository.append("[#TCP_STATUS#]" + status + "\n");
+                    appendTcpStatus(status);
                 }
         );
     }
 
     private void dispatchTcpData(String line) {
-        consoleLogRepository.append(line);
+        if (line != null) {
+            String trimmed = line.trim();
+            if (!trimmed.isEmpty() && !trimmed.startsWith("cmd=")) {
+                if (!shouldSuppressTcpInfo(trimmed)) {
+                    consoleLogRepository.append(line);
+                }
+            }
+        }
         processTcpPayload(line);
+    }
+
+    private boolean shouldSuppressTcpInfo(String trimmedLine) {
+        if (!trimmedLine.startsWith("[TCP]")) {
+            return false;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (trimmedLine.equals(lastTcpInfoLine) && now - lastTcpInfoAt < TCP_INFO_SUPPRESS_MS) {
+            return true;
+        }
+        lastTcpInfoLine = trimmedLine;
+        lastTcpInfoAt = now;
+        return false;
+    }
+
+    private void appendTcpStatus(String status) {
+        if (status == null || status.equals(lastStatusLogged)) {
+            return;
+        }
+        lastStatusLogged = status;
+        consoleLogRepository.append("[#TCP_STATUS#]" + status + "\n");
+    }
+
+    private void appendTcpError(String error) {
+        if (error == null) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (error.equals(lastErrorLogged) && now - lastErrorAt < TCP_ERROR_SUPPRESS_MS) {
+            return;
+        }
+        lastErrorLogged = error;
+        lastErrorAt = now;
+        consoleLogRepository.append("[#TCP_ERR#]" + error + "\n");
     }
 
     private void applyConfig(@Nullable TcpConfigRepository.TcpConfig config) {

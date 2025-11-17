@@ -30,12 +30,7 @@ final class OverlayNotificationHelper {
             return;
         }
         NotificationChannel channel = manager.getNotificationChannel(CHANNEL_ID);
-        boolean needCreate = channel == null;
-        if (!needCreate && channel.getImportance() > NotificationManager.IMPORTANCE_MIN) {
-            manager.deleteNotificationChannel(CHANNEL_ID);
-            needCreate = true;
-        }
-        if (needCreate) {
+        if (channel == null) {
             channel = new NotificationChannel(
                     CHANNEL_ID,
                     "Overlay probe",
@@ -47,6 +42,13 @@ final class OverlayNotificationHelper {
             channel.setDescription("Минимальный сервис для диагностики убиваний системой");
             channel.setLockscreenVisibility(Notification.VISIBILITY_SECRET);
             manager.createNotificationChannel(channel);
+        } else if (channel.getImportance() > NotificationManager.IMPORTANCE_MIN) {
+            // Can't downgrade importance without user action; log for awareness.
+            android.util.Log.w(
+                    "OverlayNotification",
+                    "Overlay channel importance=" + channel.getImportance() +
+                            " (expected IMPORTANCE_MIN). User may have raised it manually."
+            );
         }
     }
 

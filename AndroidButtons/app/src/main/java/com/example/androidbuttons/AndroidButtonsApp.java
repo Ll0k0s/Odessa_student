@@ -16,6 +16,6 @@ public class AndroidButtonsApp extends Application {
         super.onCreate();
         AppGraph.initialize(this);
         ConsoleLogRepository consoleLogRepository = AppGraph.get().consoleLog();
-        CrashLogger.install(consoleLogRepository);
+        CrashLogger.install(this, consoleLogRepository);
     }
 }
