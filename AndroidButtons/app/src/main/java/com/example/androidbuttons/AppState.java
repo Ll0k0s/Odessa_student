@@ -21,10 +21,6 @@ public final class AppState {
     public static final String KEY_TCP_HOST = "tcp_host";
     public static final String KEY_TCP_PORT = "tcp_port";
 
-    // TCP по умолчанию (для инициализации)
-    public static final String DEFAULT_TCP_HOST = "192.168.2.6";
-    public static final int DEFAULT_TCP_PORT = 9000;
-
     // Ключи позиции и масштаба overlay
     public static final String KEY_OVERLAY_X = "overlay_x";
     public static final String KEY_OVERLAY_Y = "overlay_y";

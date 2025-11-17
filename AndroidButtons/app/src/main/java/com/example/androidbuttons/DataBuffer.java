@@ -7,6 +7,8 @@ import java.util.concurrent.LinkedBlockingQueue;
 // Буфер строк для консоли, группирует сообщения перед выводом
 class DataBuffer implements AutoCloseable {
 
+    private static final long FLUSH_INTERVAL_MS = 100L;
+
     // Получатель готового блока текста
     interface StringConsumer { void accept(String s); }
 
@@ -18,15 +20,28 @@ class DataBuffer implements AutoCloseable {
     private final StringConsumer consumer;
     // Таймер фоновой отправки
     private final Timer timer = new Timer("ui-buf", true);
+    private volatile boolean closed = false;
 
     DataBuffer(int maxFlushBytes, StringConsumer consumer) {
         // Гарантируем минимальный размер пакета
         this.maxFlushBytes = Math.max(64, maxFlushBytes);
         this.consumer = consumer;
-        // Периодический слив очереди
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override public void run() { flush(); }
-        }, 100, 100);
+        // Запускаем цикл ручного параллельного планирования, чтобы избежать scheduleAtFixedRate
+        scheduleNextFlush();
+    }
+
+    private void scheduleNextFlush() {
+        if (closed) return;
+        long safeDelay = Math.max(1L, FLUSH_INTERVAL_MS);
+        timer.schedule(new TimerTask() {
+            @Override public void run() {
+                try {
+                    flush();
+                } finally {
+                    scheduleNextFlush();
+                }
+            }
+        }, safeDelay);
     }
 
     // Кладём строку в очередь
@@ -54,6 +69,7 @@ class DataBuffer implements AutoCloseable {
     @Override
     public void close() {
         // Останавливаем таймер и досливаем остатки
+        closed = true;
         timer.cancel();
         flush();
     }
