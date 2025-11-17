@@ -18,7 +18,8 @@ public final class OverlaySettingsRepository {
     private static final String KEY_X = "overlay_x";
     private static final String KEY_Y = "overlay_y";
     private static final String KEY_SCALE = "overlay_scale";
-    private static final String KEY_ALLOW_EDIT = "overlay_allow_edit";
+    private static final String KEY_EDIT_MODE = "overlay_edit_mode";
+    private static final String LEGACY_KEY_ALLOW_EDIT = "overlay_allow_edit";
 
     private final SharedPreferences prefs;
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
@@ -31,8 +32,10 @@ public final class OverlaySettingsRepository {
         int x = prefs.getInt(KEY_X, -10);
         int y = prefs.getInt(KEY_Y, 0);
         float scale = prefs.getFloat(KEY_SCALE, 1.0f);
-        boolean editAllowed = prefs.getBoolean(KEY_ALLOW_EDIT, true);
-        return new OverlaySettings(x, y, scale, editAllowed);
+        boolean editModeEnabled = prefs.contains(KEY_EDIT_MODE)
+                ? prefs.getBoolean(KEY_EDIT_MODE, true)
+                : prefs.getBoolean(LEGACY_KEY_ALLOW_EDIT, true);
+        return new OverlaySettings(x, y, scale, editModeEnabled);
     }
 
     public void update(@NonNull OverlaySettings settings) {
@@ -44,16 +47,23 @@ public final class OverlaySettingsRepository {
                 .putInt(KEY_X, settings.x)
                 .putInt(KEY_Y, settings.y)
                 .putFloat(KEY_SCALE, settings.scale)
-                .putBoolean(KEY_ALLOW_EDIT, settings.editAllowed)
+                .putBoolean(KEY_EDIT_MODE, settings.editModeEnabled)
+                .remove(LEGACY_KEY_ALLOW_EDIT)
                 .apply();
         notifyListeners(settings);
     }
 
-    public void setEditAllowed(boolean allowed) {
-        if (prefs.getBoolean(KEY_ALLOW_EDIT, true) == allowed) {
+    public void setEditModeEnabled(boolean enabled) {
+        boolean current = prefs.contains(KEY_EDIT_MODE)
+                ? prefs.getBoolean(KEY_EDIT_MODE, true)
+                : prefs.getBoolean(LEGACY_KEY_ALLOW_EDIT, true);
+        if (current == enabled) {
             return;
         }
-        prefs.edit().putBoolean(KEY_ALLOW_EDIT, allowed).apply();
+        prefs.edit()
+                .putBoolean(KEY_EDIT_MODE, enabled)
+                .remove(LEGACY_KEY_ALLOW_EDIT)
+                .apply();
         notifyListeners(get());
     }
 
@@ -101,22 +111,26 @@ public final class OverlaySettingsRepository {
         public final int x;
         public final int y;
         public final float scale;
-        public final boolean editAllowed;
+        public final boolean editModeEnabled;
 
-        public OverlaySettings(int x, int y, float scale, boolean editAllowed) {
+        public OverlaySettings(int x, int y, float scale, boolean editModeEnabled) {
             this.x = x;
             this.y = y;
             this.scale = scale;
-            this.editAllowed = editAllowed;
+            this.editModeEnabled = editModeEnabled;
         }
 
         public OverlaySettings withPosition(int newX, int newY) {
-            return new OverlaySettings(newX, newY, scale, editAllowed);
+            return new OverlaySettings(newX, newY, scale, editModeEnabled);
         }
 
         public OverlaySettings withScale(float newScale) {
             float clamped = Math.max(0.1f, Math.min(5f, newScale));
-            return new OverlaySettings(x, y, clamped, editAllowed);
+            return new OverlaySettings(x, y, clamped, editModeEnabled);
+        }
+
+        public OverlaySettings withEditMode(boolean enabled) {
+            return new OverlaySettings(x, y, scale, enabled);
         }
 
         @Override
@@ -127,7 +141,7 @@ public final class OverlaySettingsRepository {
             return x == other.x
                     && y == other.y
                     && Float.compare(scale, other.scale) == 0
-                    && editAllowed == other.editAllowed;
+                    && editModeEnabled == other.editModeEnabled;
         }
 
         @Override
@@ -135,7 +149,7 @@ public final class OverlaySettingsRepository {
             int result = x;
             result = 31 * result + y;
             result = 31 * result + Float.floatToIntBits(scale);
-            result = 31 * result + (editAllowed ? 1 : 0);
+            result = 31 * result + (editModeEnabled ? 1 : 0);
             return result;
         }
     }

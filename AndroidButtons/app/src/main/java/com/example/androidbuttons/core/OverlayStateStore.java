@@ -21,14 +21,15 @@ public final class OverlayStateStore {
             currentState.set(0);
             return;
         }
-        currentState.set(state);
+        int normalized = ProtocolConstraints.clampState(state);
+        currentState.set(normalized);
         for (Listener listener : listeners) {
-            listener.onOverlayStateChanged(state);
+            listener.onOverlayStateChanged(normalized);
         }
     }
 
     public void publishSelection(int state) {
-        if (state <= 0) {
+        if (!ProtocolConstraints.isValidState(state)) {
             return;
         }
         for (SelectionListener listener : selectionListeners) {

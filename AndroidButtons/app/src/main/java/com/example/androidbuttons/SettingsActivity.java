@@ -22,6 +22,8 @@ import com.example.androidbuttons.core.AppGraph;
 import com.example.androidbuttons.core.ConsoleLogRepository;
 import com.example.androidbuttons.core.OverlaySettingsRepository;
 import com.example.androidbuttons.core.OverlayStateStore;
+import com.example.androidbuttons.core.ProtocolConstraints;
+import com.example.androidbuttons.core.ServiceLaunchers;
 import com.example.androidbuttons.core.TcpConfigRepository;
 import com.example.androidbuttons.core.TcpStatusStore;
 import com.example.androidbuttons.databinding.ActivitySettingsBinding;
@@ -70,6 +72,7 @@ public class SettingsActivity extends AppCompatActivity {
         setContentView(binding.getRoot());
         binding.textConsole.setMovementMethod(new ScrollingMovementMethod());
 
+        ServiceLaunchers.ensureTcpServiceRunning(this);
         initGraph();
         refreshValuesFromState();
         setupHostAndPortWatchers();
@@ -107,13 +110,13 @@ public class SettingsActivity extends AppCompatActivity {
         if (!keyboardVisible) {
             updateOverlayFields(settings);
         }
-        boolean allow = settings.editAllowed;
-        if (binding.switchAllowOverlayModification.isChecked() != allow) {
+        boolean editModeEnabled = settings.editModeEnabled;
+        if (binding.switchAllowOverlayModification.isChecked() != editModeEnabled) {
             suppressOverlaySwitch = true;
-            binding.switchAllowOverlayModification.setChecked(allow);
+            binding.switchAllowOverlayModification.setChecked(editModeEnabled);
             suppressOverlaySwitch = false;
         }
-        applyEditModeEnabled(allow);
+        applyEditModeEnabled(editModeEnabled);
     }
 
     private void handleTcpConfigChanged(TcpConfigRepository.TcpConfig config) {
@@ -121,7 +124,7 @@ public class SettingsActivity extends AppCompatActivity {
         if (!keyboardVisible) {
             updateTcpFields(config);
         }
-        int targetSelection = Math.max(0, config.selectedLoco - 1);
+        int targetSelection = ProtocolConstraints.locoIndex(config.selectedLoco);
         if (binding.spinnerNum.getSelectedItemPosition() != targetSelection) {
             binding.spinnerNum.setSelection(targetSelection, false);
         }
@@ -206,9 +209,9 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private void setupLocoSpinner() {
-        String[] locoItems = new String[8];
-        for (int i = 0; i < 8; i++) {
-            locoItems[i] = "Loco" + (i + 1);
+        String[] locoItems = new String[ProtocolConstraints.LOCOMOTIVE_COUNT];
+        for (int i = 0; i < ProtocolConstraints.LOCOMOTIVE_COUNT; i++) {
+            locoItems[i] = "Loco" + (ProtocolConstraints.LOCO_MIN + i);
         }
         ArrayAdapter<String> locoAdapter = new ArrayAdapter<>(
                 this,
@@ -217,11 +220,11 @@ public class SettingsActivity extends AppCompatActivity {
         );
         locoAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         binding.spinnerNum.setAdapter(locoAdapter);
-        binding.spinnerNum.setSelection(Math.max(0, currentTcpConfig().selectedLoco - 1), false);
+        binding.spinnerNum.setSelection(ProtocolConstraints.locoIndex(currentTcpConfig().selectedLoco), false);
         binding.spinnerNum.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                int loco = position + 1;
+                int loco = ProtocolConstraints.locoFromIndex(position);
                 TcpConfigRepository.TcpConfig current = currentTcpConfig();
                 if (current.selectedLoco != loco) {
                     tcpConfigRepository.setSelectedLoco(loco);
@@ -233,17 +236,17 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private void setupOverlaySwitch() {
-        boolean editAllowed = currentOverlaySettings().editAllowed;
+        boolean editModeEnabled = currentOverlaySettings().editModeEnabled;
         suppressOverlaySwitch = true;
-        binding.switchAllowOverlayModification.setChecked(editAllowed);
+        binding.switchAllowOverlayModification.setChecked(editModeEnabled);
         suppressOverlaySwitch = false;
-        applyEditModeEnabled(editAllowed);
+        applyEditModeEnabled(editModeEnabled);
 
         binding.switchAllowOverlayModification.setOnCheckedChangeListener((buttonView, isChecked) -> {
             if (suppressOverlaySwitch) {
                 return;
             }
-            overlaySettingsRepository.setEditAllowed(isChecked);
+            overlaySettingsRepository.setEditModeEnabled(isChecked);
             String status = isChecked ? "разрешено" : "запрещено";
             Toast.makeText(this, "Изменение окна " + status, Toast.LENGTH_SHORT).show();
             if (isChecked) {
@@ -288,12 +291,12 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     // Включаем/выключаем элементы редактирования overlay (позиция, масштаб)
-    private void applyEditModeEnabled(boolean allow) {
-        binding.valueOverlayX.setEnabled(allow);
-        binding.valueOverlayY.setEnabled(allow);
-        binding.seekbarOverlayScale.setEnabled(allow);
+    private void applyEditModeEnabled(boolean editModeEnabled) {
+        binding.valueOverlayX.setEnabled(editModeEnabled);
+        binding.valueOverlayY.setEnabled(editModeEnabled);
+        binding.seekbarOverlayScale.setEnabled(editModeEnabled);
 
-        float alpha = allow ? 1f : 0.4f;
+        float alpha = editModeEnabled ? 1f : 0.4f;
         binding.valueOverlayX.setAlpha(alpha);
         binding.valueOverlayY.setAlpha(alpha);
         binding.seekbarOverlayScale.setAlpha(alpha);

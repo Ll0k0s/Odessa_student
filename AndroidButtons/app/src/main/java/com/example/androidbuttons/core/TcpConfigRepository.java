@@ -7,6 +7,8 @@ import androidx.annotation.NonNull;
 
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import static com.example.androidbuttons.core.ProtocolConstraints.clampLoco;
+
 /**
  * Stores TCP host/port and currently selected locomotive number.
  */
@@ -19,7 +21,7 @@ public final class TcpConfigRepository {
 
     private static final String DEFAULT_HOST = "192.168.2.6";
     private static final int DEFAULT_PORT = 9000;
-    private static final int DEFAULT_LOCO = 1;
+    private static final int DEFAULT_LOCO = ProtocolConstraints.LOCO_MIN;
 
     private final SharedPreferences prefs;
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
@@ -50,7 +52,7 @@ public final class TcpConfigRepository {
     }
 
     public void setSelectedLoco(int loco) {
-        int clamped = Math.max(1, Math.min(8, loco));
+        int clamped = clampLoco(loco);
         if (prefs.getInt(KEY_LOCO, DEFAULT_LOCO) == clamped) {
             return;
         }

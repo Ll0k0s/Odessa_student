@@ -106,7 +106,7 @@ final class OverlayGestureHandler implements View.OnTouchListener {
             return false;
         }
 
-        boolean allowModification = overlaySettingsRepository.get().editAllowed;
+        boolean allowModification = overlaySettingsRepository.get().editModeEnabled;
 
         if (!allowModification) {
             if (event.getAction() == MotionEvent.ACTION_UP) {
@@ -298,7 +298,7 @@ final class OverlayGestureHandler implements View.OnTouchListener {
         int zone = (int) (y / (height / 5f)) + 1;
         if (zone < 1) zone = 1; else if (zone > 5) zone = 5;
 
-        boolean allowModification = overlaySettingsRepository.get().editAllowed;
+        boolean allowModification = overlaySettingsRepository.get().editModeEnabled;
         if (allowModification) {
             Log.d(TAG, "State tap ignored (edit mode) zone=" + zone);
             return true;

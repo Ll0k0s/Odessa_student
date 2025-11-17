@@ -11,6 +11,11 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.example.androidbuttons.core.ProtocolConstraints.LOCO_MAX;
+import static com.example.androidbuttons.core.ProtocolConstraints.LOCO_MIN;
+import static com.example.androidbuttons.core.ProtocolConstraints.STATE_MAX;
+import static com.example.androidbuttons.core.ProtocolConstraints.STATE_MIN;
+
 // Менеджер TCP-подключения к ESP/железу.
 // Держит авто-подключение, сбор/разбор кадров и не блокирует UI.
 class TcpManager {
@@ -39,11 +44,6 @@ class TcpManager {
     private Socket socket;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    // Допустимые диапазоны номера локомотива и состояния
-    private static final int LOCO_MIN = 1;
-    private static final int LOCO_MAX = 8;
-    private static final int STATE_MIN = 1;
-    private static final int STATE_MAX = 6;
     private static final long AUTO_RETRY_DELAY_MS = 1000;
     private static final long AUTO_RETRY_MAX_DELAY_MS = 30000;
     private static final int CONNECT_TIMEOUT_MS = 4000;

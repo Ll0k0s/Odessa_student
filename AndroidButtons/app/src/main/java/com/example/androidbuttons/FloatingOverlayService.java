@@ -29,6 +29,7 @@ import com.example.androidbuttons.core.AppContracts;
 import com.example.androidbuttons.core.AppGraph;
 import com.example.androidbuttons.core.OverlaySettingsRepository;
 import com.example.androidbuttons.core.OverlayStateStore;
+import com.example.androidbuttons.core.ServiceLaunchers;
 
 /**
  * Foreground overlay service that shows a diagnostic strip on top of every screen.
@@ -65,7 +66,7 @@ public class FloatingOverlayService extends Service {
 
     private final OverlayStateStore.Listener stripStateListener = state ->
             mainHandler.post(() -> {
-                boolean editMode = overlaySettings != null && overlaySettings.editAllowed;
+                boolean editMode = overlaySettings != null && overlaySettings.editModeEnabled;
                 int shownState = stateAnimator != null ? stateAnimator.getCurrentState() : 0;
                 if (editMode && shownState != 0) {
                     Log.d(TAG, "stripStateListener: ignore state=" + state + " (edit mode, current=" + shownState + ")");
@@ -89,6 +90,7 @@ public class FloatingOverlayService extends Service {
         Log.i(TAG, "onCreate");
         OverlayNotificationHelper.ensureChannel(this);
         AppGraph graph = AppGraph.get();
+        ServiceLaunchers.ensureTcpServiceRunning(this);
         overlaySettingsRepository = graph.overlaySettings();
         overlaySettings = overlaySettingsRepository.get();
         overlaySettingsListener = settings -> mainHandler.post(() -> applyOverlaySettings(settings));
@@ -239,7 +241,7 @@ public class FloatingOverlayService extends Service {
             }
 
             OverlaySettingsRepository.OverlaySettings settingsSnapshot = currentOverlaySettings();
-            setOverlayAlpha(settingsSnapshot.editAllowed ? ALPHA_EDIT_MODE : ALPHA_NORMAL);
+            setOverlayAlpha(settingsSnapshot.editModeEnabled ? ALPHA_EDIT_MODE : ALPHA_NORMAL);
 
             int existingState = overlayStateStore.getCurrentState();
             if (existingState <= 0) {
@@ -316,7 +318,7 @@ public class FloatingOverlayService extends Service {
 
     private void applyOverlaySettings(OverlaySettingsRepository.OverlaySettings settings) {
         overlaySettings = settings;
-        float targetAlpha = settings.editAllowed ? ALPHA_EDIT_MODE : ALPHA_NORMAL;
+        float targetAlpha = settings.editModeEnabled ? ALPHA_EDIT_MODE : ALPHA_NORMAL;
         setOverlayAlpha(targetAlpha);
         if (overlayParams == null || windowManager == null || overlayView == null) {
             return;
