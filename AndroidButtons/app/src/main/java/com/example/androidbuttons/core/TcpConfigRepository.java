@@ -7,6 +7,10 @@ import androidx.annotation.NonNull;
 
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import static com.example.androidbuttons.AppState.DEFAULT_TCP_HOST;
+import static com.example.androidbuttons.AppState.DEFAULT_TCP_PORT;
+import static com.example.androidbuttons.AppState.KEY_TCP_HOST;
+import static com.example.androidbuttons.AppState.KEY_TCP_PORT;
 import static com.example.androidbuttons.core.ProtocolConstraints.clampLoco;
 
 /**
@@ -15,12 +19,8 @@ import static com.example.androidbuttons.core.ProtocolConstraints.clampLoco;
 public final class TcpConfigRepository {
 
     private static final String PREFS_NAME = "tcp_config";
-    private static final String KEY_HOST = "tcp_host";
-    private static final String KEY_PORT = "tcp_port";
     private static final String KEY_LOCO = "tcp_loco";
 
-    private static final String DEFAULT_HOST = "192.168.2.6";
-    private static final int DEFAULT_PORT = 9000;
     private static final int DEFAULT_LOCO = ProtocolConstraints.LOCO_MIN;
 
     private final SharedPreferences prefs;
@@ -31,22 +31,22 @@ public final class TcpConfigRepository {
     }
 
     public TcpConfig get() {
-        String host = prefs.getString(KEY_HOST, DEFAULT_HOST);
-        int port = prefs.getInt(KEY_PORT, DEFAULT_PORT);
+        String host = prefs.getString(KEY_TCP_HOST, DEFAULT_TCP_HOST);
+        int port = prefs.getInt(KEY_TCP_PORT, DEFAULT_TCP_PORT);
         int loco = prefs.getInt(KEY_LOCO, DEFAULT_LOCO);
         return new TcpConfig(host, port, loco);
     }
 
     public void updateHostAndPort(@NonNull String host, int port) {
-        String normalizedHost = host == null ? DEFAULT_HOST : host.trim();
-        int safePort = port < 1 || port > 65535 ? DEFAULT_PORT : port;
+        String normalizedHost = host == null ? DEFAULT_TCP_HOST : host.trim();
+        int safePort = port < 1 || port > 65535 ? DEFAULT_TCP_PORT : port;
         TcpConfig current = get();
         if (current.host.equals(normalizedHost) && current.port == safePort) {
             return;
         }
         prefs.edit()
-                .putString(KEY_HOST, normalizedHost)
-                .putInt(KEY_PORT, safePort)
+                .putString(KEY_TCP_HOST, normalizedHost)
+                .putInt(KEY_TCP_PORT, safePort)
                 .apply();
         notifyListeners(get());
     }

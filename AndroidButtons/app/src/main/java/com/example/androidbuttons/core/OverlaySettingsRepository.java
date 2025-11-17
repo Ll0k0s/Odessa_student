@@ -32,9 +32,7 @@ public final class OverlaySettingsRepository {
         int x = prefs.getInt(KEY_X, -10);
         int y = prefs.getInt(KEY_Y, 0);
         float scale = prefs.getFloat(KEY_SCALE, 1.0f);
-        boolean editModeEnabled = prefs.contains(KEY_EDIT_MODE)
-                ? prefs.getBoolean(KEY_EDIT_MODE, true)
-                : prefs.getBoolean(LEGACY_KEY_ALLOW_EDIT, true);
+        boolean editModeEnabled = resolveEditModeDefault();
         return new OverlaySettings(x, y, scale, editModeEnabled);
     }
 
@@ -54,9 +52,7 @@ public final class OverlaySettingsRepository {
     }
 
     public void setEditModeEnabled(boolean enabled) {
-        boolean current = prefs.contains(KEY_EDIT_MODE)
-                ? prefs.getBoolean(KEY_EDIT_MODE, true)
-                : prefs.getBoolean(LEGACY_KEY_ALLOW_EDIT, true);
+        boolean current = resolveEditModeDefault();
         if (current == enabled) {
             return;
         }
@@ -86,6 +82,16 @@ public final class OverlaySettingsRepository {
         }
         prefs.edit().putFloat(KEY_SCALE, clamped).apply();
         notifyListeners(get());
+    }
+
+    private boolean resolveEditModeDefault() {
+        if (prefs.contains(KEY_EDIT_MODE)) {
+            return prefs.getBoolean(KEY_EDIT_MODE, false);
+        }
+        if (prefs.contains(LEGACY_KEY_ALLOW_EDIT)) {
+            return prefs.getBoolean(LEGACY_KEY_ALLOW_EDIT, false);
+        }
+        return false;
     }
 
     public void addListener(@NonNull Listener listener) {

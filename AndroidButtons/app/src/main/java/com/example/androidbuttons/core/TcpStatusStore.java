@@ -8,22 +8,22 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public final class TcpStatusStore {
 
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
-    private volatile TcpStatus current = TcpStatus.disconnected();
+    private volatile TcpState current = TcpState.DISCONNECTED;
 
-    public TcpStatus get() {
+    public TcpState get() {
         return current;
     }
 
-    public void update(TcpStatus status) {
-        current = status;
+    public void update(TcpState state) {
+        current = state;
         for (Listener listener : listeners) {
-            listener.onTcpStatusChanged(status);
+            listener.onTcpStateChanged(state);
         }
     }
 
     public void addListener(Listener listener) {
         listeners.addIfAbsent(listener);
-        listener.onTcpStatusChanged(current);
+        listener.onTcpStateChanged(current);
     }
 
     public void removeListener(Listener listener) {
@@ -31,34 +31,6 @@ public final class TcpStatusStore {
     }
 
     public interface Listener {
-        void onTcpStatusChanged(TcpStatus status);
-    }
-
-    public static final class TcpStatus {
-        public final boolean connected;
-        public final boolean connecting;
-        public final boolean reachable;
-
-        private TcpStatus(boolean connected, boolean connecting, boolean reachable) {
-            this.connected = connected;
-            this.connecting = connecting;
-            this.reachable = reachable;
-        }
-
-        public static TcpStatus connecting() {
-            return new TcpStatus(false, true, false);
-        }
-
-        public static TcpStatus connected() {
-            return new TcpStatus(true, false, true);
-        }
-
-        public static TcpStatus disconnected() {
-            return new TcpStatus(false, false, false);
-        }
-
-        public TcpStatus withReachable(boolean reachable) {
-            return new TcpStatus(connected, connecting, reachable);
-        }
+        void onTcpStateChanged(TcpState state);
     }
 }

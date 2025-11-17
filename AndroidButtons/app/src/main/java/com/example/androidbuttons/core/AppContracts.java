@@ -9,7 +9,6 @@ public final class AppContracts {
 
     public static final String ACTION_APPLY_SCALE = "com.example.androidbuttons.APPLY_SCALE_NOW";
     public static final String ACTION_APPLY_POSITION = "com.example.androidbuttons.APPLY_POSITION_NOW";
-    public static final String ACTION_OVERLAY_UPDATED = "com.example.androidbuttons.OVERLAY_UPDATED";
 
     public static final String EXTRA_OVERLAY_X = "com.example.androidbuttons.extra.OVERLAY_X";
     public static final String EXTRA_OVERLAY_Y = "com.example.androidbuttons.extra.OVERLAY_Y";

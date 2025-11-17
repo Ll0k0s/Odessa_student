@@ -9,7 +9,6 @@ import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 
-import com.example.androidbuttons.core.AppContracts;
 import com.example.androidbuttons.core.OverlaySettingsRepository;
 import com.example.androidbuttons.core.OverlayStateStore;
 
@@ -379,9 +378,6 @@ final class OverlayGestureHandler implements View.OnTouchListener {
 
         Log.d(TAG, "Overlay scale saved: " + currentScale + " (width=" + overlayParams.width + ")");
 
-        android.content.Intent intent = new android.content.Intent(AppContracts.ACTION_OVERLAY_UPDATED);
-        intent.putExtra(AppContracts.EXTRA_OVERLAY_SCALE, currentScale);
-        context.sendBroadcast(intent);
     }
 
     private void saveOverlayPosition() {
@@ -398,10 +394,6 @@ final class OverlayGestureHandler implements View.OnTouchListener {
 
         Log.d(TAG, "Overlay position saved: x=" + clampedX + " y=" + overlayParams.y);
 
-        android.content.Intent intent = new android.content.Intent(AppContracts.ACTION_OVERLAY_UPDATED);
-        intent.putExtra(AppContracts.EXTRA_OVERLAY_X, clampedX);
-        intent.putExtra(AppContracts.EXTRA_OVERLAY_Y, overlayParams.y);
-        context.sendBroadcast(intent);
     }
 
     private float getDistance(MotionEvent event) {

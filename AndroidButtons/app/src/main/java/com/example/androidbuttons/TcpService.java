@@ -15,9 +15,13 @@ import com.example.androidbuttons.core.OverlaySettingsRepository;
 import com.example.androidbuttons.core.OverlayStateStore;
 import com.example.androidbuttons.core.ProtocolConstraints;
 import com.example.androidbuttons.core.TcpConfigRepository;
+import com.example.androidbuttons.core.TcpState;
 import com.example.androidbuttons.core.TcpStatusStore;
 
 import java.util.concurrent.atomic.AtomicInteger;
+
+import static com.example.androidbuttons.AppState.DEFAULT_TCP_HOST;
+import static com.example.androidbuttons.AppState.DEFAULT_TCP_PORT;
 
 /**
  * Background service that owns TcpManager lifecycle and exposes it to bound clients.
@@ -84,9 +88,11 @@ public class TcpService extends Service {
             @Override
             public void run() {
                 boolean alive = tcpManager != null && tcpManager.checkConnectionAlive();
-                TcpStatusStore.TcpStatus status = tcpStatusStore.get();
-                if (status.reachable != alive) {
-                    tcpStatusStore.update(status.withReachable(alive));
+                TcpState state = tcpStatusStore.get();
+                if (!alive && state == TcpState.CONNECTED) {
+                    postStatus(TcpState.UNREACHABLE);
+                } else if (alive && state == TcpState.UNREACHABLE) {
+                    postStatus(TcpState.CONNECTED);
                 }
                 mainHandler.postDelayed(this, HEALTH_INTERVAL_MS);
             }
@@ -141,15 +147,15 @@ public class TcpService extends Service {
 
     private void initTcpManager() {
         tcpManager = new TcpManager(
-                () -> postStatus(TcpStatusStore.TcpStatus.connecting()),
-                () -> postStatus(TcpStatusStore.TcpStatus.disconnected()),
+                () -> postStatus(TcpState.CONNECTING),
+                () -> postStatus(TcpState.DISCONNECTED),
                 this::dispatchTcpData,
                 error -> consoleLogRepository.append("[#TCP_ERR#]" + error + "\n"),
                 status -> {
                     if ("connected".equals(status)) {
-                        postStatus(TcpStatusStore.TcpStatus.connected());
+                        postStatus(TcpState.CONNECTED);
                     } else {
-                        postStatus(TcpStatusStore.TcpStatus.disconnected());
+                        postStatus(TcpState.DISCONNECTED);
                     }
                     consoleLogRepository.append("[#TCP_STATUS#]" + status + "\n");
                 }
@@ -189,16 +195,16 @@ public class TcpService extends Service {
         tcpManager.enableAutoConnect(activeHost, activePort);
     }
 
-    private void postStatus(TcpStatusStore.TcpStatus status) {
-        mainHandler.post(() -> tcpStatusStore.update(status));
+    private void postStatus(TcpState state) {
+        mainHandler.post(() -> tcpStatusStore.update(state));
     }
 
     private String normalizeHost(String host) {
-        return (host == null || host.trim().isEmpty()) ? "192.168.2.6" : host.trim();
+        return (host == null || host.trim().isEmpty()) ? DEFAULT_TCP_HOST : host.trim();
     }
 
     private int normalizePort(int port) {
-        return port <= 0 ? 9000 : port;
+        return port <= 0 ? DEFAULT_TCP_PORT : port;
     }
 
     private void handleOverlaySelection(int state) {
@@ -250,12 +256,11 @@ public class TcpService extends Service {
         if (overlayStateStore == null || !ProtocolConstraints.isValidState(state)) {
             return;
         }
-        if (isOverlayInEditMode()) {
-            consoleLogRepository.append("[#TCP_RX#]Remote state ignored (edit mode)\n");
-            return;
-        }
         selectedState.set(state);
         overlayStateStore.publish(state);
+        if (isOverlayInEditMode()) {
+            consoleLogRepository.append("[#TCP_RX#]Remote state applied while edit mode active\n");
+        }
     }
 
     private int extractDecimal(String line, String token) {

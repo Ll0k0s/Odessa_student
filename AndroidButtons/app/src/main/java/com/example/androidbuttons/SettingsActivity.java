@@ -25,6 +25,7 @@ import com.example.androidbuttons.core.OverlayStateStore;
 import com.example.androidbuttons.core.ProtocolConstraints;
 import com.example.androidbuttons.core.ServiceLaunchers;
 import com.example.androidbuttons.core.TcpConfigRepository;
+import com.example.androidbuttons.core.TcpState;
 import com.example.androidbuttons.core.TcpStatusStore;
 import com.example.androidbuttons.databinding.ActivitySettingsBinding;
 
@@ -285,9 +286,9 @@ public class SettingsActivity extends AppCompatActivity {
         updateField(binding.valuePortTCP, pendingPort);
     }
 
-    private void updateStatusIndicators(TcpStatusStore.TcpStatus status) {
-        binding.switchTCPIndicator.setChecked(status.reachable);
-        binding.progressBarTCPIndicator.setVisibility(status.connecting ? View.VISIBLE : View.GONE);
+    private void updateStatusIndicators(TcpState state) {
+        binding.switchTCPIndicator.setChecked(state.reachable);
+        binding.progressBarTCPIndicator.setVisibility(state.connecting ? View.VISIBLE : View.GONE);
     }
 
     // Включаем/выключаем элементы редактирования overlay (позиция, масштаб)
