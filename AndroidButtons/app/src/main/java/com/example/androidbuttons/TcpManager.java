@@ -7,6 +7,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.Locale;
+import android.util.Log;
 import java.util.function.Consumer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -78,6 +79,7 @@ final class TcpManager {
     private volatile boolean searching = false;
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
     private volatile long nextAutoAttemptAt = 0L;
+    private static final String TAG = "TcpManager";
     private volatile boolean manualDisconnectRequested = false;
 
     // Внутренний буфер для приёма фреймов
@@ -349,16 +351,22 @@ final class TcpManager {
         if (writer.isShutdown()) return;
 
         final byte[] frame = buildControlFrame(loco, state);
+        System.out.println("[TCP][SEND] frame: " + toHex(frame, 0, frame.length));
         writer.submit(() -> {
             try {
                 Socket sck;
                 synchronized (this) {
                     sck = socket;
                 }
-                if (sck == null || sck.isClosed() || !sck.isConnected()) return;
+                if (sck == null || sck.isClosed() || !sck.isConnected()) {
+                    System.out.println("[TCP][SEND] socket not connected");
+                    return;
+                }
                 sck.getOutputStream().write(frame);
                 sck.getOutputStream().flush();
+                System.out.println("[TCP][SEND] frame sent");
             } catch (IOException e) {
+                System.out.println("[TCP][SEND] error: " + e.getMessage());
                 if (onError != null) onError.accept("TCP TX error: " + e.getMessage());
                 running.set(false);
                 closeQuietly();
@@ -635,6 +643,7 @@ final class TcpManager {
             String msg = "[CLIENT] DISCONNECT\n";
             sck.getOutputStream().write(msg.getBytes("UTF-8"));
             sck.getOutputStream().flush();
+            System.out.println("[TCP][SEND] shutdown notice: " + msg);
             System.out.println("[TCP][GOODBYE] disconnect notice sent");
         } catch (Exception e) {
             // Если не получилось — просто логируем и продолжаем гаситься

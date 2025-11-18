@@ -287,10 +287,6 @@ public class MainActivity extends AppCompatActivity {
         if (state < 1 || state > 5) {
             return;
         }
-        boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-        if (allowModification) {
-            return;
-        }
         currentState = state;
         if (sendCommands) {
             sendExclusiveRelays(state);
