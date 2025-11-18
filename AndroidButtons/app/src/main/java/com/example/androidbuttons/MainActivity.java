@@ -100,7 +100,6 @@ public class MainActivity extends AppCompatActivity {
                         }
 
                         if (ln.startsWith("[TCP]")) {
-                            uiBuffer.offer(ln + "\n");
                             continue;
                         }
 
@@ -113,8 +112,6 @@ public class MainActivity extends AppCompatActivity {
                         if (stateVal < 1 || stateVal > 5) {
                             continue;
                         }
-
-                        uiBuffer.offer("[#TCP_RX#]" + "Rx: loco" + locoVal + " -> state" + stateVal + "\n");
 
                         final int stateCopy = stateVal;
                         runOnUiThread(() -> updateStateFromExternal(stateCopy));
@@ -130,11 +127,6 @@ public class MainActivity extends AppCompatActivity {
 
                     if (lastStatusConnected == null || !lastStatusConnected.equals(connected)) {
                         lastStatusConnected = connected;
-                        if (connected) {
-                            uiBuffer.offer("[#TCP_STATUS#]TCP connected\n");
-                        } else {
-                            uiBuffer.offer("[#TCP_STATUS#]TCP disconnected\n");
-                        }
                     }
                 })
         );
@@ -406,7 +398,6 @@ public class MainActivity extends AppCompatActivity {
         int state = Math.max(1, Math.min(5, active));
         tcpManager.sendControl(loco, state);
         if (tcpManager.connectionActive()) {
-            uiBuffer.offer("[#TCP_TX#]" + "Tx: loco" + loco + " -> state" + state + "\n");
         }
     }
 }
