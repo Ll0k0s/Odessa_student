@@ -9,6 +9,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.util.Log;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -88,8 +90,13 @@ public class MainActivity extends AppCompatActivity {
                     if (data == null || data.isEmpty()) {
                         return;
                     }
+                    // Показываем все входящие данные в UI-консоли
+                    try {
+                        AppState.consoleQueue.offer(data);
+                    } catch (Throwable ignored) {}
                     String[] lines = data.split("\n");
                     int locoTarget = AppState.selectedLoco.get();
+                    Pattern p = Pattern.compile("L(\\d+):S(\\d+)");
                     for (String line : lines) {
                         if (line == null) {
                             continue;
@@ -102,6 +109,25 @@ public class MainActivity extends AppCompatActivity {
                         if (ln.startsWith("[TCP]")) {
                             continue;
                         }
+
+                        // Формат: Lx:Sx (например "L1:S1 L2:S2 ...") — поддерживаем короткий формат
+                        try {
+                            Matcher m = p.matcher(ln);
+                            boolean handled = false;
+                            while (m.find()) {
+                                int locoVal = Integer.parseInt(m.group(1));
+                                int stateVal = Integer.parseInt(m.group(2));
+                                if (locoVal == locoTarget) {
+                                    if (stateVal >= 1 && stateVal <= 5) {
+                                        final int stateCopy = stateVal;
+                                        runOnUiThread(() -> updateStateFromExternal(stateCopy));
+                                    }
+                                    handled = true;
+                                    break;
+                                }
+                            }
+                            if (handled) continue;
+                        } catch (Throwable ignored) {}
 
                         int locoVal = extractDecimal(ln, "loco=");
                         if (locoVal <= 0 || locoVal != locoTarget) {
@@ -138,7 +164,8 @@ public class MainActivity extends AppCompatActivity {
         if (initHost != null) initHost = initHost.trim();
         tcpManager.enableAutoConnect(initHost, initPort);
 
-        updateStateFromExternal(1);
+        // Установим начальный цвет светофора — временно красный (state=4)
+        applyStripState(4, false);
         StateBus.publishOverlaySelection(1);
 
         tcpStatusTimer = new java.util.Timer();

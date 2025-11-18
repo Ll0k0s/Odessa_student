@@ -188,6 +188,13 @@ final class TcpManager {
                                 System.out.println("TCP RX (" + n + " bytes): " + toHex(buf, 0, n));
                             } catch (Throwable ignored) {
                             }
+                            // Выводим также принятые данные как строку (чтобы видеть текстовое содержимое)
+                            try {
+                                String s = new String(buf, 0, n);
+                                System.out.println("TCP RX (string): " + s);
+                                if (onData != null) onData.accept(s + "\n");
+                            } catch (Throwable ignored) {
+                            }
                             feedRx(buf, 0, n);
                             drainFrames();
                         }
