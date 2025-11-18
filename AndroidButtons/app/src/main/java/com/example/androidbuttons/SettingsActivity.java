@@ -139,7 +139,6 @@ public class SettingsActivity extends AppCompatActivity {
                     android.content.Intent intent = new android.content.Intent("com.example.androidbuttons.APPLY_SCALE_NOW");
                     intent.putExtra("scale", scale);
                     sendBroadcast(intent);
-                    android.util.Log.d("SettingsActivity", "SeekBar changed scale to: " + scale);
                 }
             }
 
@@ -175,15 +174,12 @@ public class SettingsActivity extends AppCompatActivity {
 
         // Обработка переключателя "Разрешить изменение окна"
         binding.switchAllowOverlayModification.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            android.util.Log.e("SettingsActivity", "═══════ SWITCH CLICKED: isChecked=" + isChecked + " ═══════");
-
             // Сохраняем флаг в prefs синхронно
             prefs.edit()
                     .putBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, isChecked)
                     .commit();
 
             boolean saved = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-            android.util.Log.e("SettingsActivity", "═══════ SAVED VALUE: " + saved + " ═══════");
 
             String status = isChecked ? "разрешено" : "запрещено";
             android.widget.Toast.makeText(this, "Изменение окна " + status, android.widget.Toast.LENGTH_SHORT).show();
@@ -248,14 +244,6 @@ public class SettingsActivity extends AppCompatActivity {
                     binding.progressBarTCPIndicator.setVisibility(
                             AppState.tcpConnecting ? View.VISIBLE : View.GONE
                     );
-
-                    if (wasReachable != isReachable) {
-                        android.util.Log.d(
-                                "SettingsActivity",
-                                "TCP reachability changed: " + wasReachable + " -> " + isReachable +
-                                        " (connecting=" + AppState.tcpConnecting + ")"
-                        );
-                    }
                 });
             }
         }, 0, 100);
@@ -281,7 +269,6 @@ public class SettingsActivity extends AppCompatActivity {
                         suppressWatchers = true;
                         updateField(binding.valueOverlayX, pendingOverlayX);
                         suppressWatchers = false;
-                        android.util.Log.d("SettingsActivity", "Overlay X updated from broadcast: " + x);
                     }
 
                     // Обновляем Y, если пришёл в интенте
@@ -291,7 +278,6 @@ public class SettingsActivity extends AppCompatActivity {
                         suppressWatchers = true;
                         updateField(binding.valueOverlayY, pendingOverlayY);
                         suppressWatchers = false;
-                        android.util.Log.d("SettingsActivity", "Overlay Y updated from broadcast: " + y);
                     }
 
                     // Обновляем масштаб, если он пришёл
@@ -301,7 +287,6 @@ public class SettingsActivity extends AppCompatActivity {
                         int progress = (int) Math.round((scale - 0.1f) / 0.05f);
                         binding.seekbarOverlayScale.setProgress(progress);
                         binding.textScaleValue.setText(String.format(java.util.Locale.US, "%.2f", scale));
-                        android.util.Log.d("SettingsActivity", "Overlay scale updated from broadcast: " + scale);
                     }
                 }
             }
@@ -327,12 +312,6 @@ public class SettingsActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        android.util.Log.d(
-                "SettingsActivity",
-                "onResume() called. Current pending values: " +
-                        "X=" + pendingOverlayX + " Y=" + pendingOverlayY +
-                        " Scale=" + pendingOverlayScale
-        );
     }
 
     @Override
@@ -360,12 +339,6 @@ public class SettingsActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        android.util.Log.d(
-                "SettingsActivity",
-                "onPause() called. Saving pending values: " +
-                        "X=" + pendingOverlayX + " Y=" + pendingOverlayY +
-                        " Scale=" + pendingOverlayScale
-        );
         // При уходе с экрана сохраняем pending значения
         applyPendingChanges(true);
     }
@@ -479,12 +452,6 @@ public class SettingsActivity extends AppCompatActivity {
         pendingOverlayY = String.valueOf(overlayY);
         pendingOverlayScale = String.valueOf(overlayScale);
 
-        android.util.Log.d(
-                "SettingsActivity",
-                "Loaded overlay params: X=" + overlayX + " Y=" + overlayY +
-                        " Scale=" + overlayScale
-        );
-
         updateField(binding.valueAddrTCP, pendingHost);
         updateField(binding.valuePortTCP, pendingPort);
         updateField(binding.valueOverlayX, pendingOverlayX);
@@ -560,11 +527,6 @@ public class SettingsActivity extends AppCompatActivity {
 
         if (changed) {
             editor.apply();
-            android.util.Log.d(
-                    "SettingsActivity",
-                    "Saved overlay params: X=" + overlayXValue + " Y=" + overlayYValue +
-                            " Scale=" + overlayScaleValue
-            );
         }
 
         pendingHost = hostValue;

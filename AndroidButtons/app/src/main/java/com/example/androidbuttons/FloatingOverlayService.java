@@ -111,20 +111,15 @@ public class FloatingOverlayService extends Service {
 			if (allowModification) {
 				// Если уже что-то отображено — блокируем, иначе разрешаем первый paint
 				if (currentState != 0) {
-					Log.d(TAG, "stripStateListener: ignore state=" + state + " (edit mode, currentState=" + currentState + ")");
 					return;
-				} else {
-					Log.d(TAG, "stripStateListener: first paint allowed in edit mode state=" + state);
 				}
 			}
-			Log.d(TAG, "stripStateListener: applying state=" + state + " (current=" + currentState + ")");
 			updateOverlayState(state);
 		});
 
 	private final Runnable heartbeatRunnable = new Runnable() {
 		@Override
 		public void run() {
-			Log.d(TAG, "heartbeat attached=" + overlayAttached.get());
 			refreshOverlayStatus();
 			mainHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
 		}
@@ -133,31 +128,21 @@ public class FloatingOverlayService extends Service {
 	@Override
 	public void onCreate() {
 		super.onCreate();
-		Log.i(TAG, "onCreate");
 		ensureChannel();
 		windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-		if (windowManager == null) {
-			Log.e(TAG, "WindowManager unavailable");
-		}
 
 		android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
 
 		// Слушатель изменений SharedPreferences для автоматического применения прозрачности
 		preferenceListener = (sharedPreferences, key) -> {
-			Log.e(TAG, "═══════ PREF CHANGED: key=" + key + " ═══════");
 			if (AppState.KEY_OVERLAY_ALLOW_MODIFICATION.equals(key)) {
 				boolean allow = sharedPreferences.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
 				float targetAlpha = allow ? ALPHA_EDIT_MODE : ALPHA_NORMAL;
-
-				Log.e(TAG, "═══════ TARGET ALPHA=" + targetAlpha + " allow=" + allow + " overlayView=" + overlayView + " ═══════");
 
 				// Применяем прозрачность немедленно через mainHandler
 				mainHandler.post(() -> {
 					if (overlayView != null) {
 						overlayView.setAlpha(targetAlpha);
-						Log.e(TAG, "✓✓✓ ALPHA CHANGED IMMEDIATELY -> " + targetAlpha + " (allow=" + allow + ")");
-					} else {
-						Log.e(TAG, "✗✗✗ overlayView is NULL, cannot change alpha!");
 					}
 				});
 			}
@@ -171,7 +156,6 @@ public class FloatingOverlayService extends Service {
 				if ("com.example.androidbuttons.APPLY_SCALE_NOW".equals(intent.getAction())) {
 					float scale = intent.getFloatExtra("scale", 1.0f);
 					applyScale(scale);
-					Log.d(TAG, "Scale applied immediately: " + scale);
 				}
 			}
 		};
@@ -196,9 +180,7 @@ public class FloatingOverlayService extends Service {
 
 					try {
 						windowManager.updateViewLayout(overlayView, overlayParams);
-						Log.d(TAG, "Position applied immediately: x=" + overlayParams.x + " y=" + overlayParams.y);
 					} catch (Exception e) {
-						Log.e(TAG, "Failed to apply position", e);
 					}
 				}
 			}
@@ -207,17 +189,14 @@ public class FloatingOverlayService extends Service {
 		registerReceiver(positionReceiver, positionFilter);
 
 		boolean allowAtStart = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
-		Log.d(TAG, "Initial overlay alpha based on allowModification=" + allowAtStart);
 	}
 
 	@Override
 	public int onStartCommand(Intent intent, int flags, int startId) {
-		Log.i(TAG, "onStartCommand flags=" + flags + " startId=" + startId);
 		Notification notification = buildNotification();
 		startForeground(NOTIFICATION_ID, notification);
 
 		if (intent != null && ACTION_RECREATE_OVERLAY.equals(intent.getAction())) {
-			Log.i(TAG, "Recreating overlay with updated parameters");
 			mainHandler.post(() -> {
 				detachOverlay();
 				maybeAttachOverlay();
@@ -230,7 +209,6 @@ public class FloatingOverlayService extends Service {
 
 	@Override
 	public void onDestroy() {
-		Log.i(TAG, "onDestroy");
 		mainHandler.removeCallbacks(heartbeatRunnable);
 		detachOverlay();
 
@@ -240,7 +218,6 @@ public class FloatingOverlayService extends Service {
 				android.content.SharedPreferences prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
 				prefs.unregisterOnSharedPreferenceChangeListener(preferenceListener);
 			} catch (Exception e) {
-				Log.w(TAG, "Failed to unregister preference listener", e);
 			}
 			preferenceListener = null;
 		}
@@ -250,7 +227,6 @@ public class FloatingOverlayService extends Service {
 			try {
 				unregisterReceiver(scaleReceiver);
 			} catch (IllegalArgumentException e) {
-				Log.w(TAG, "scaleReceiver already unregistered", e);
 			}
 			scaleReceiver = null;
 		}
@@ -260,7 +236,6 @@ public class FloatingOverlayService extends Service {
 			try {
 				unregisterReceiver(positionReceiver);
 			} catch (IllegalArgumentException e) {
-				Log.w(TAG, "positionReceiver already unregistered", e);
 			}
 			positionReceiver = null;
 		}
@@ -284,11 +259,9 @@ public class FloatingOverlayService extends Service {
 			return;
 		}
 		if (windowManager == null) {
-			Log.w(TAG, "maybeAttachOverlay: windowManager is null");
 			return;
 		}
 		if (!canDrawOverlays()) {
-			Log.w(TAG, "maybeAttachOverlay: overlay permission missing");
 			return;
 		}
 
@@ -311,7 +284,6 @@ public class FloatingOverlayService extends Service {
 			boolean currentAllow = currentPrefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
 			float actualAlpha = currentAllow ? ALPHA_EDIT_MODE : ALPHA_NORMAL;
 
-			Log.e(TAG, "▓▓▓ OVERLAY ATTACHED: actualAllow=" + currentAllow + " -> alpha=" + actualAlpha + " ▓▓▓");
 			setOverlayAlpha(actualAlpha);
 
 			// --- ИНИЦИАЛИЗАЦИЯ СТАРТОВОГО СОСТОЯНИЯ ---
@@ -326,15 +298,12 @@ public class FloatingOverlayService extends Service {
 			float currentScale = currentPrefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
 			updateCornerRadius(currentScale);
 
-			Log.i(TAG, "Overlay attached");
-
 			setupOverlayInteractions();
 			refreshOverlayStatus();
 			StateBus.registerStateListener(stripStateListener);
 			mainHandler.removeCallbacks(heartbeatRunnable);
 			mainHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
 		} catch (RuntimeException ex) {
-			Log.e(TAG, "Failed to attach overlay", ex);
 			overlayAttached.set(false);
 			overlayView = null;
 		}
@@ -376,11 +345,9 @@ public class FloatingOverlayService extends Service {
 		android.content.SharedPreferences p = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
 		boolean allowModification = p.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
 		if (allowModification) {
-			Log.d(TAG, "State tap ignored (edit mode) zone=" + zone);
 			return true;
 		}
 		if (zone != currentState) {
-			Log.i(TAG, "Overlay selects state=" + zone);
 			updateOverlayState(zone);
 			StateBus.publishOverlaySelection(zone);
 		}
@@ -406,7 +373,6 @@ public class FloatingOverlayService extends Service {
 			return true;
 		} else {
 			if (event.getAction() == MotionEvent.ACTION_UP) {
-				Log.d(TAG, "State change blocked in edit mode (tap ignored) — allowing gesture finalization");
 			}
 		}
 
@@ -416,10 +382,8 @@ public class FloatingOverlayService extends Service {
 		switch (action) {
 			case MotionEvent.ACTION_DOWN:
 				if (suppressMoveUntilUp && gestureMode == GestureMode.NONE) {
-					Log.d(TAG, "ACTION_DOWN ignored (suppressMoveUntilUp still true) — resetting now");
 				}
 				if (suppressMoveUntilUp) {
-					Log.d(TAG, "Clearing suppressMoveUntilUp on new ACTION_DOWN");
 					suppressMoveUntilUp = false;
 				}
 				initialTouchX = event.getRawX();
@@ -451,7 +415,6 @@ public class FloatingOverlayService extends Service {
 						scalePivotY = (event.getRawY(0) + event.getRawY(1)) / 2f;
 						pauseAnimation();
 						animationPausedForScaling = true;
-						Log.d(TAG, "Scale start pivot=(" + scalePivotX + "," + scalePivotY + ") scale=" + initialScale);
 					}
 				}
 				return true;
@@ -502,7 +465,6 @@ public class FloatingOverlayService extends Service {
 					try {
 						windowManager.updateViewLayout(overlayView, overlayParams);
 					} catch (Exception e) {
-						Log.e(TAG, "Failed to update overlay position", e);
 					}
 				}
 				return true;
@@ -535,15 +497,10 @@ public class FloatingOverlayService extends Service {
 					float totalDelta = Math.abs(event.getRawX() - initialTouchX) + Math.abs(event.getRawY() - initialTouchY);
 					if (didMoveDuringGesture || coordsChanged || totalDelta >= dpToPx(2)) {
 						saveOverlayPosition();
-					} else {
-						Log.d(TAG, "ACTION_UP MOVE: no significant movement (" + totalDelta + ") — position unchanged");
 					}
 				}
 				gestureMode = GestureMode.NONE;
 				if (pointerCount <= 1) {
-					if (suppressMoveUntilUp) {
-						Log.d(TAG, "All fingers up — clearing suppressMoveUntilUp");
-					}
 					suppressMoveUntilUp = false;
 				}
 				return true;
@@ -594,7 +551,6 @@ public class FloatingOverlayService extends Service {
 		try {
 			windowManager.updateViewLayout(overlayView, overlayParams);
 		} catch (Exception e) {
-			Log.e(TAG, "Failed to apply scale", e);
 		}
 	}
 
@@ -619,7 +575,6 @@ public class FloatingOverlayService extends Service {
 		try {
 			windowManager.updateViewLayout(overlayView, overlayParams);
 		} catch (Exception e) {
-			Log.e(TAG, "Failed to apply scale with position", e);
 		}
 	}
 
@@ -644,7 +599,6 @@ public class FloatingOverlayService extends Service {
 		overlayRoot.setBackground(background);
 		overlayRoot.setClipToOutline(true);
 
-		Log.d(TAG, "Corner radius updated to: " + newRadiusPx + "px (scale=" + scale + ")");
 	}
 
 	/**
@@ -663,8 +617,6 @@ public class FloatingOverlayService extends Service {
 				.putFloat(AppState.KEY_OVERLAY_SCALE, currentScale)
 				.apply();
 
-		Log.d(TAG, "Overlay scale saved: " + currentScale + " (width=" + overlayParams.width + ")");
-
 		android.content.Intent intent = new android.content.Intent(AppState.ACTION_OVERLAY_UPDATED);
 		intent.putExtra(AppState.KEY_OVERLAY_SCALE, currentScale);
 		sendBroadcast(intent);
@@ -678,7 +630,6 @@ public class FloatingOverlayService extends Service {
 			return;
 		}
 		overlayView.setAlpha(alpha);
-		Log.d(TAG, "Overlay alpha set to: " + alpha);
 	}
 
 	/**
@@ -701,8 +652,6 @@ public class FloatingOverlayService extends Service {
 				.putInt(AppState.KEY_OVERLAY_X, clampedX)
 				.putInt(AppState.KEY_OVERLAY_Y, overlayParams.y)
 				.apply();
-
-		Log.d(TAG, "Overlay position saved: x=" + clampedX + " y=" + overlayParams.y);
 
 		android.content.Intent intent = new android.content.Intent(AppState.ACTION_OVERLAY_UPDATED);
 		intent.putExtra(AppState.KEY_OVERLAY_X, clampedX);
@@ -731,9 +680,7 @@ public class FloatingOverlayService extends Service {
 		if (windowManager != null && overlayView != null) {
 			try {
 				windowManager.removeViewImmediate(overlayView);
-				Log.i(TAG, "Overlay detached");
 			} catch (IllegalArgumentException ex) {
-				Log.w(TAG, "Overlay already removed", ex);
 			}
 		}
 		StateBus.unregisterStateListener(stripStateListener);
@@ -797,17 +744,12 @@ public class FloatingOverlayService extends Service {
 		int finalWidth = Math.round(BASE_WIDTH_PX * savedScale);
 		int finalHeight = Math.round(BASE_HEIGHT_PX * savedScale);
 
-		Log.i(TAG, "Loading overlay params: X=" + savedX + " Y=" + savedY +
-				" Scale=" + savedScale + " (W=" + finalWidth + " H=" + finalHeight + ")");
-
 		if (!prefs.contains(AppState.KEY_OVERLAY_X)) {
 			prefs.edit()
 					.putInt(AppState.KEY_OVERLAY_X, defaultX)
 					.putInt(AppState.KEY_OVERLAY_Y, defaultY)
 					.putFloat(AppState.KEY_OVERLAY_SCALE, defaultScale)
 					.apply();
-			Log.d(TAG, "Initialized default overlay position: x=" + defaultX + " y=" + defaultY +
-					" scale=" + defaultScale);
 		}
 
 		WindowManager.LayoutParams params = new WindowManager.LayoutParams(
@@ -824,7 +766,6 @@ public class FloatingOverlayService extends Service {
 		if (savedX == 0) {
 			int compensation = computeLeftCompensation();
 			params.x = -compensation;
-			Log.d(TAG, "Applied left compensation=" + compensation + "px");
 		} else {
 			params.x = savedX;
 		}
@@ -865,7 +806,6 @@ public class FloatingOverlayService extends Service {
 		}
 		NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
 		if (manager == null) {
-			Log.w(TAG, "NotificationManager is null, cannot create channel");
 			return;
 		}
 		NotificationChannel channel = manager.getNotificationChannel(CHANNEL_ID);
@@ -886,7 +826,6 @@ public class FloatingOverlayService extends Service {
 			channel.setDescription("Минимальный сервис для диагностики убиваний системой");
 			channel.setLockscreenVisibility(Notification.VISIBILITY_SECRET);
 			manager.createNotificationChannel(channel);
-			Log.i(TAG, "Notification channel created");
 		}
 	}
 
@@ -895,30 +834,24 @@ public class FloatingOverlayService extends Service {
 	 */
 	private void updateOverlayState(int state) {
 		if (overlayStateStrip == null) {
-			Log.d(TAG, "updateOverlayState: view null, skip state=" + state);
 			return;
 		}
 		int resId = resolveDrawableForState(state);
 		if (resId == 0) {
-			Log.w(TAG, "updateOverlayState: unresolved drawable for state=" + state);
 			return;
 		}
 		if (state == currentState && resId == lastResId && overlayStateStrip.getDrawable() != null) {
-			Log.d(TAG, "updateOverlayState: no-op (same state=" + state + ")");
 			return;
 		}
 		Drawable newDrawable = AppCompatResources.getDrawable(this, resId);
 		if (newDrawable == null) {
-			Log.w(TAG, "updateOverlayState: drawable load failed resId=" + resId + " state=" + state);
 			return;
 		}
 		if (overlayRoot == null || overlayStateStrip.getDrawable() == null || currentState == 0) {
 			cancelOverlayAnimator();
 			overlayStateStrip.setAlpha(1f);
 			overlayStateStrip.setImageDrawable(newDrawable);
-			Log.d(TAG, "updateOverlayState: applied immediately state=" + state + " resId=" + resId);
 		} else {
-			Log.d(TAG, "updateOverlayState: crossfade from=" + currentState + " to=" + state);
 			startStripCrossfade(newDrawable);
 		}
 		currentState = state;
@@ -1018,7 +951,6 @@ public class FloatingOverlayService extends Service {
 	private void pauseAnimation() {
 		if (overlayAnimator != null && overlayAnimator.isRunning()) {
 			overlayAnimator.pause();
-			Log.d(TAG, "Animation paused");
 		}
 	}
 
@@ -1028,7 +960,6 @@ public class FloatingOverlayService extends Service {
 	private void resumeAnimation() {
 		if (overlayAnimator != null && overlayAnimator.isPaused()) {
 			overlayAnimator.resume();
-			Log.d(TAG, "Animation resumed");
 		}
 	}
 

@@ -127,7 +127,6 @@ public class MainActivity extends AppCompatActivity {
                     boolean connected = "connected".equals(status);
                     AppState.tcpConnected = connected;
                     AppState.tcpReachable = connected;
-                    Log.d("MainActivity", "TCP status changed: " + status + " -> connected=" + connected);
 
                     if (lastStatusConnected == null || !lastStatusConnected.equals(connected)) {
                         lastStatusConnected = connected;
@@ -149,7 +148,6 @@ public class MainActivity extends AppCompatActivity {
 
         updateStateFromExternal(1);
         StateBus.publishOverlaySelection(1);
-        Log.d("MainActivity", "Initial state set to 1 (green)");
 
         tcpStatusTimer = new java.util.Timer();
         tcpStatusTimer.scheduleAtFixedRate(new java.util.TimerTask() {
@@ -299,7 +297,6 @@ public class MainActivity extends AppCompatActivity {
         }
         boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
         if (allowModification) {
-            Log.d(TAG_SERVICE, "applyStripState ignored in edit mode state=" + state);
             return;
         }
         currentState = state;
@@ -318,7 +315,6 @@ public class MainActivity extends AppCompatActivity {
         }
         boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
         if (allowModification) {
-            Log.d(TAG_SERVICE, "External state update ignored (edit mode) state=" + state);
             return;
         }
         currentState = state;
@@ -353,7 +349,6 @@ public class MainActivity extends AppCompatActivity {
         try {
             Context appCtx = getApplicationContext();
             if (!canDrawOverlays()) {
-                Log.w(TAG_SERVICE, "Overlay permission missing, requesting");
                 requestOverlayPermission();
                 return;
             }
@@ -366,9 +361,7 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 appCtx.startService(svcIntent);
             }
-            Log.i(TAG_SERVICE, "FloatingOverlayService start requested");
         } catch (Exception ex) {
-            Log.e(TAG_SERVICE, "Failed to start FloatingOverlayService", ex);
         }
     }
 
@@ -384,7 +377,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         if (overlayPermissionRequested) {
-            Log.i(TAG_SERVICE, "Overlay permission dialog already shown");
             return;
         }
         overlayPermissionRequested = true;
@@ -392,10 +384,8 @@ public class MainActivity extends AppCompatActivity {
             Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                     Uri.parse("package:" + getPackageName()));
             startActivityForResult(intent, REQUEST_OVERLAY_PERMISSION);
-            Log.i(TAG_SERVICE, "Requesting overlay permission via settings");
         } catch (ActivityNotFoundException ex) {
             overlayPermissionRequested = false;
-            Log.e(TAG_SERVICE, "Overlay permission settings unavailable", ex);
         }
     }
 
@@ -405,10 +395,7 @@ public class MainActivity extends AppCompatActivity {
         if (requestCode == REQUEST_OVERLAY_PERMISSION) {
             overlayPermissionRequested = false;
             if (canDrawOverlays()) {
-                Log.i(TAG_SERVICE, "Overlay permission granted");
                 ensureOverlayServiceRunning();
-            } else {
-                Log.w(TAG_SERVICE, "Overlay permission still missing after user interaction");
             }
         }
     }
