@@ -11,6 +11,13 @@ public final class AppState {
     // Текущий выбранный локомотив (1..8)
     public static final AtomicInteger selectedLoco = new AtomicInteger(1);
 
+    // Хранилище состояний для каждого локомотива (индексы 0-7 для локо 1-8)
+    // По умолчанию все в allOn (6)
+    public static final AtomicInteger[] locoStates = new AtomicInteger[] {
+        new AtomicInteger(6), new AtomicInteger(6), new AtomicInteger(6), new AtomicInteger(6),
+        new AtomicInteger(6), new AtomicInteger(6), new AtomicInteger(6), new AtomicInteger(6)
+    };
+
     // Очередь лога между сервисами и экраном настроек
     public static final LinkedBlockingQueue<String> consoleQueue = new LinkedBlockingQueue<>();
 

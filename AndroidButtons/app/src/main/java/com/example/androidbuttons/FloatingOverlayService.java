@@ -289,8 +289,8 @@ public class FloatingOverlayService extends Service {
 			// --- ИНИЦИАЛИЗАЦИЯ СТАРТОВОГО СОСТОЯНИЯ ---
 			int existing = StateBus.getCurrentState();
 			if (existing <= 0) {
-				StateBus.publishStripState(1); // фиксируем зелёный глобально и для других компонентов
-				existing = 1;
+				StateBus.publishStripState(6); // фиксируем allOn глобально и для других компонентов
+				existing = 6;
 			}
 			updateOverlayState(existing);
 
@@ -975,6 +975,8 @@ public class FloatingOverlayService extends Service {
 				return R.drawable.state_04_red;
 			case 5:
 				return R.drawable.state_05_white;
+			case 6:
+				return R.drawable.state_06_allon;
 			default:
 				return 0;
 		}

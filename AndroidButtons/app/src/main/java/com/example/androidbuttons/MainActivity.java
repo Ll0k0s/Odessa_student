@@ -113,34 +113,39 @@ public class MainActivity extends AppCompatActivity {
                         // Формат: Lx:Sx (например "L1:S1 L2:S2 ...") — поддерживаем короткий формат
                         try {
                             Matcher m = p.matcher(ln);
-                            boolean handled = false;
+                            boolean handledCurrent = false;
                             while (m.find()) {
                                 int locoVal = Integer.parseInt(m.group(1));
                                 int stateVal = Integer.parseInt(m.group(2));
-                                if (locoVal == locoTarget) {
-                                    if (stateVal >= 1 && stateVal <= 5) {
+                                
+                                // Сохраняем состояние для всех локомотивов
+                                if (locoVal >= 1 && locoVal <= 8 && stateVal >= 1 && stateVal <= 6) {
+                                    AppState.locoStates[locoVal - 1].set(stateVal);
+                                    
+                                    // Применяем только если это текущий локомотив
+                                    if (locoVal == locoTarget) {
                                         final int stateCopy = stateVal;
                                         runOnUiThread(() -> updateStateFromExternal(stateCopy));
+                                        handledCurrent = true;
                                     }
-                                    handled = true;
-                                    break;
                                 }
                             }
-                            if (handled) continue;
+                            if (handledCurrent) continue;
                         } catch (Throwable ignored) {}
 
                         int locoVal = extractDecimal(ln, "loco=");
-                        if (locoVal <= 0 || locoVal != locoTarget) {
-                            continue;
-                        }
                         int stateVal = extractDecimal(ln, "state=");
-                        // Диапазон от железа: 1..5
-                        if (stateVal < 1 || stateVal > 5) {
-                            continue;
+                        
+                        // Сохраняем состояние для указанного локомотива
+                        if (locoVal >= 1 && locoVal <= 8 && stateVal >= 1 && stateVal <= 6) {
+                            AppState.locoStates[locoVal - 1].set(stateVal);
+                            
+                            // Применяем только если это текущий локомотив
+                            if (locoVal == locoTarget) {
+                                final int stateCopy = stateVal;
+                                runOnUiThread(() -> updateStateFromExternal(stateCopy));
+                            }
                         }
-
-                        final int stateCopy = stateVal;
-                        runOnUiThread(() -> updateStateFromExternal(stateCopy));
                     }
                 },
                 error -> {
@@ -159,13 +164,16 @@ public class MainActivity extends AppCompatActivity {
 
         prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
         prefs.registerOnSharedPreferenceChangeListener(prefListener);
+        
+        // Установим начальный цвет светофора — белый (state=5) ДО запуска сервиса
+        int initialState = AppState.locoStates[AppState.selectedLoco.get() - 1].get();
+        applyStripState(initialState, false);
+        
         String initHost = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
         int initPort = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
         if (initHost != null) initHost = initHost.trim();
         tcpManager.enableAutoConnect(initHost, initPort);
 
-        // Установим начальный цвет светофора — временно красный (state=4)
-        applyStripState(4, false);
         StateBus.publishOverlaySelection(1);
 
         tcpStatusTimer = new java.util.Timer();
@@ -304,17 +312,24 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void handleOverlaySelection(int state) {
-        if (state < 1 || state > 5) {
+        if (state < 1 || state > 6) {
             return;
         }
         applyStripState(state, true);
     }
 
     private void applyStripState(int state, boolean sendCommands) {
-        if (state < 1 || state > 5) {
+        if (state < 1 || state > 6) {
             return;
         }
         currentState = state;
+        
+        // Сохраняем состояние для текущего локомотива
+        int currentLoco = AppState.selectedLoco.get();
+        if (currentLoco >= 1 && currentLoco <= 8) {
+            AppState.locoStates[currentLoco - 1].set(state);
+        }
+        
         if (sendCommands) {
             sendExclusiveRelays(state);
         }
@@ -322,7 +337,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateStateFromExternal(int state) {
-        if (state < 1 || state > 5) {
+        if (state < 1 || state > 6) {
             return;
         }
         if (state == currentState) {
@@ -333,6 +348,13 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         currentState = state;
+        
+        // Сохраняем состояние для текущего локомотива
+        int currentLoco = AppState.selectedLoco.get();
+        if (currentLoco >= 1 && currentLoco <= 8) {
+            AppState.locoStates[currentLoco - 1].set(state);
+        }
+        
         StateBus.publishStripState(state);
     }
 

@@ -146,9 +146,17 @@ public class SettingsActivity extends AppCompatActivity {
             @Override public void onStopTrackingTouch(android.widget.SeekBar seekBar) {}
         });
 
-        // Формируем список Loco1..Loco8 для спиннера
-        String[] locoItems = new String[8];
-        for (int i = 0; i < 8; i++) locoItems[i] = "Loco" + (i + 1);
+        // Список локомотивов для спиннера
+        String[] locoItems = new String[] {
+            "ТЕП70-145",
+            "М62-1511",
+            "М62-1391",
+            "М62-1458",
+            "ЧМЕ3-3019",
+            "ЧМЕ3-4537",
+            "ТГК2 3169",
+            "ЧМЕ2-305"
+        };
 
         // Настраиваем адаптер спиннера
         ArrayAdapter<String> locoAdapter = new ArrayAdapter<>(
@@ -162,11 +170,18 @@ public class SettingsActivity extends AppCompatActivity {
         // Выставляем текущий локомотив из AppState
         binding.spinnerNum.setSelection(Math.max(0, AppState.selectedLoco.get() - 1));
 
-        // Сохраняем выбранный локомотив в AppState
+        // Сохраняем выбранный локомотив в AppState и восстанавливаем его состояние
         binding.spinnerNum.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                AppState.selectedLoco.set(position + 1);
+                int newLoco = position + 1;
+                AppState.selectedLoco.set(newLoco);
+                
+                // Восстанавливаем сохранённое состояние для выбранного локомотива
+                if (newLoco >= 1 && newLoco <= 8) {
+                    int savedState = AppState.locoStates[newLoco - 1].get();
+                    StateBus.publishStripState(savedState);
+                }
             }
 
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
