@@ -23,10 +23,15 @@ public class SettingsActivity extends AppCompatActivity {
     private android.content.SharedPreferences prefs;
 
     private static final int CONSOLE_MAX_CHARS = 20000; // ограничение размера консоли
+    // Пункт «Інша адреса» идёт после всех заранее запрограммированных локомотивов
+    private static final int CUSTOM_LOCO_POSITION = AppState.CUSTOM_LOCO_INDEX;
+    private ArrayAdapter<String> locoAdapter;
+    private java.util.List<String> locoLabels;
 
     // Временные значения полей (до записи в prefs)
     private String pendingHost;
     private String pendingPort;
+    private String pendingLocoAddress;
     private String pendingOverlayX;
     private String pendingOverlayY;
     private String pendingOverlayScale;
@@ -51,6 +56,7 @@ public class SettingsActivity extends AppCompatActivity {
 
         // Получаем SharedPreferences
         prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
+        AppState.migrateTcpDefaults(prefs);
 
         // Загружаем стартовые значения в поля
         refreshValuesFromPreferences();
@@ -146,45 +152,50 @@ public class SettingsActivity extends AppCompatActivity {
             @Override public void onStopTrackingTouch(android.widget.SeekBar seekBar) {}
         });
 
-        // Список локомотивов для спиннера
-        String[] locoItems = new String[] {
-            "ТЕП70-145",
-            "М62-1511",
-            "М62-1391",
-            "М62-1458",
-            "ЧМЕ3-3019",
-            "ЧМЕ3-4537",
-            "ТГК2 3169",
-            "ЧМЕ2-305"
-        };
-
-        // Настраиваем адаптер спиннера
-        ArrayAdapter<String> locoAdapter = new ArrayAdapter<>(
+        // Список локомотивов: заранее запрограммированные + «Інша адреса».
+        // Адрес любого пункта можно поменять в поле под списком.
+        locoLabels = new java.util.ArrayList<>(java.util.Arrays.asList(buildLocoLabels()));
+        locoAdapter = new ArrayAdapter<>(
                 this,
                 android.R.layout.simple_spinner_item,
-                locoItems
+                locoLabels
         );
         locoAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         binding.spinnerNum.setAdapter(locoAdapter);
+        binding.spinnerNum.setSelection(AppState.getSelectedLocoIndex(prefs));
 
-        // Выставляем текущий локомотив из AppState
-        binding.spinnerNum.setSelection(Math.max(0, AppState.selectedLoco.get() - 1));
-
-        // Сохраняем выбранный локомотив в AppState и восстанавливаем его состояние
         binding.spinnerNum.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                int newLoco = position + 1;
-                AppState.selectedLoco.set(newLoco);
-                
-                // Восстанавливаем сохранённое состояние для выбранного локомотива
-                if (newLoco >= 1 && newLoco <= 8) {
-                    int savedState = AppState.locoStates[newLoco - 1].get();
-                    StateBus.publishStripState(savedState);
-                }
+                prefs.edit().putInt(AppState.KEY_LOCO_INDEX, position).apply();
+                binding.layoutLocoAddress.setError(null);
+
+                int address = addressForPosition(position);
+                pendingLocoAddress = String.valueOf(address);
+                updateField(binding.valueLocoAddress, pendingLocoAddress);
+                updateLocoAddressHelper(position);
+                saveLocoAddress(address);
             }
 
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
+
+        // Ручной ввод адреса локомотива
+        binding.valueLocoAddress.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(android.text.Editable s) {
+                if (suppressWatchers) return;
+                pendingLocoAddress = String.valueOf(s);
+                pendingDirty = true;
+                binding.layoutLocoAddress.setError(null);
+            }
+        });
+        binding.valueLocoAddress.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                applyPendingChanges(false);
+            }
+            return false;
         });
 
         // Обработка переключателя "Разрешить изменение окна"
@@ -455,8 +466,8 @@ public class SettingsActivity extends AppCompatActivity {
 
     // Читаем актуальные значения из prefs и заливаем в поля
     private void refreshValuesFromPreferences() {
-        String host = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
-        int port = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
+        String host = prefs.getString(AppState.KEY_TCP_HOST, AppState.DEFAULT_TCP_HOST);
+        int port = prefs.getInt(AppState.KEY_TCP_PORT, AppState.DEFAULT_TCP_PORT);
         int overlayX = eliminateTinyOffset(prefs.getInt(AppState.KEY_OVERLAY_X, 0));
         int overlayY = prefs.getInt(AppState.KEY_OVERLAY_Y, 0);
         float overlayScale = prefs.getFloat(AppState.KEY_OVERLAY_SCALE, 1.0f);
@@ -488,13 +499,33 @@ public class SettingsActivity extends AppCompatActivity {
         // IP
         String hostValue = pendingHost != null ? pendingHost.trim() : "";
         if (hostValue.isEmpty()) {
-            hostValue = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
+            hostValue = prefs.getString(AppState.KEY_TCP_HOST, AppState.DEFAULT_TCP_HOST);
         }
 
         // Порт
         Integer portValue = parseIntSafe(pendingPort, 1, 65535);
         if (portValue == null) {
-            portValue = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
+            portValue = prefs.getInt(AppState.KEY_TCP_PORT, AppState.DEFAULT_TCP_PORT);
+        }
+
+        // Адрес выбранного локомотива: сохраняем за этим пунктом списка
+        int position = binding.spinnerNum.getSelectedItemPosition();
+        Integer address = parseIntSafe(pendingLocoAddress,
+                TcpManager.ADDRESS_MIN, TcpManager.ADDRESS_MAX);
+        if (address != null) {
+            if (address != addressForPosition(position)) {
+                if (position == CUSTOM_LOCO_POSITION) {
+                    prefs.edit().putInt(AppState.KEY_LOCO_CUSTOM_ADDRESS, address).apply();
+                } else {
+                    AppState.setPresetAddress(prefs, position, address);
+                }
+                refreshLocoLabels();
+            }
+            saveLocoAddress(address);
+            pendingLocoAddress = String.valueOf(address);
+            binding.layoutLocoAddress.setError(null);
+        } else {
+            binding.layoutLocoAddress.setError("Адреса має бути від 1 до 9999");
         }
 
         // X overlay
@@ -523,7 +554,7 @@ public class SettingsActivity extends AppCompatActivity {
             editor.putString(AppState.KEY_TCP_HOST, hostValue);
             changed = true;
         }
-        if (portValue != prefs.getInt(AppState.KEY_TCP_PORT, 9000)) {
+        if (portValue != prefs.getInt(AppState.KEY_TCP_PORT, AppState.DEFAULT_TCP_PORT)) {
             editor.putInt(AppState.KEY_TCP_PORT, portValue);
             changed = true;
         }
@@ -559,6 +590,53 @@ public class SettingsActivity extends AppCompatActivity {
         int progress = (int) Math.round((overlayScaleValue - 0.1f) / 0.05f);
         binding.seekbarOverlayScale.setProgress(progress);
         binding.textScaleValue.setText(String.format(java.util.Locale.US, "%.2f", overlayScaleValue));
+    }
+
+    // Адрес пункта списка: изменённый пользователем или по умолчанию
+    private int addressForPosition(int position) {
+        if (position == CUSTOM_LOCO_POSITION) {
+            return prefs.getInt(AppState.KEY_LOCO_CUSTOM_ADDRESS, AppState.getLocoAddress(prefs));
+        }
+        return AppState.getPresetAddress(prefs, position);
+    }
+
+    // Подписи в списке: «ТЕП70-145 — адр. 145»
+    private String[] buildLocoLabels() {
+        String[] labels = new String[AppState.LOCO_NAMES.length + 1];
+        for (int i = 0; i < AppState.LOCO_NAMES.length; i++) {
+            labels[i] = AppState.LOCO_NAMES[i] + " — адр. " + AppState.getPresetAddress(prefs, i);
+        }
+        labels[CUSTOM_LOCO_POSITION] = prefs.contains(AppState.KEY_LOCO_CUSTOM_ADDRESS)
+                ? "Інша адреса — " + prefs.getInt(AppState.KEY_LOCO_CUSTOM_ADDRESS, 0)
+                : "Інша адреса…";
+        return labels;
+    }
+
+    // Меняем подписи на месте: число пунктов не меняется, поэтому выбор в списке не сбрасывается
+    private void refreshLocoLabels() {
+        String[] labels = buildLocoLabels();
+        for (int i = 0; i < labels.length; i++) {
+            locoLabels.set(i, labels[i]);
+        }
+        locoAdapter.notifyDataSetChanged();
+    }
+
+    // Подсказка под полем адреса: какой адрес у локомотива по умолчанию
+    private void updateLocoAddressHelper(int position) {
+        if (position == CUSTOM_LOCO_POSITION) {
+            binding.layoutLocoAddress.setHelperText("Введіть адресу та натисніть «Готово»");
+        } else {
+            binding.layoutLocoAddress.setHelperText("За замовчуванням: "
+                    + AppState.LOCO_ADDRESSES[position] + ". Змініть і натисніть «Готово»");
+        }
+    }
+
+    // Сохраняем адрес локомотива; MainActivity увидит изменение и зарегистрирует его на сервере ЛС
+    private void saveLocoAddress(int address) {
+        if (address == AppState.getLocoAddress(prefs)) return;
+        prefs.edit().putInt(AppState.KEY_LOCO_ADDRESS, address).apply();
+        android.widget.Toast.makeText(this, "Адреса локомотива: " + address,
+                android.widget.Toast.LENGTH_SHORT).show();
     }
 
     // Безопасный разбор int в заданном диапазоне

@@ -180,7 +180,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:inputType="text"
-                        android:text="192.168.2.6"
+                        android:text="192.168.0.100"
                         android:textSize="@dimen/input_text_size"
                         android:textColor="#FFFFFF"
                         android:minHeight="@dimen/input_height"
@@ -206,7 +206,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:inputType="number"
-                        android:text="9000"
+                        android:text="21202"
                         android:textSize="@dimen/input_text_size"
                         android:textColor="#FFFFFF"
                         android:minHeight="@dimen/input_height"
@@ -263,6 +263,35 @@
                     android:padding="12dp"
                     android:spinnerMode="dropdown"
                     android:popupBackground="#2C2C2C" />
+
+                <!-- Адрес выбранного локомотива (можно изменить) -->
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/layout_locoAddress"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:hint="Адреса локомотива (1–9999)"
+                    app:boxBackgroundMode="outline"
+                    app:boxStrokeColor="#00E676"
+                    app:hintTextColor="#00E676"
+                    app:boxCornerRadiusTopStart="12dp"
+                    app:boxCornerRadiusTopEnd="12dp"
+                    app:boxCornerRadiusBottomStart="12dp"
+                    app:boxCornerRadiusBottomEnd="12dp">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/value_locoAddress"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number"
+                        android:maxLength="4"
+                        android:imeOptions="actionDone"
+                        android:textSize="@dimen/input_text_size"
+                        android:textColor="#FFFFFF"
+                        android:minHeight="@dimen/input_height"
+                        android:paddingTop="16dp"
+                        android:paddingBottom="16dp" />
+                </com.google.android.material.textfield.TextInputLayout>
 
             </LinearLayout>
         </androidx.cardview.widget.CardView>

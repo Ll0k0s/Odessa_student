@@ -18,16 +18,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-// Менеджер TCP-подключения к ESP/железу.
-// Держит авто-подключение, сбор/разбор кадров и не блокирует UI.
+// Менеджер TCP-подключения к серверу локомотивного светофора (ЛС).
+// Держит авто-подключение, регистрацию адреса локомотива и разбор пакетов, не блокируя UI.
+//
+// Формат пакета: DataLen(1) | Header(1) | Data(N) | XOR(1), где DataLen — длина всего пакета.
+//   0x91 (клиент → сервер): ADR_MSB, ADR_LSB — регистрация адреса локомотива
+//   0x92 (сервер → клиент): ADR_MSB, ADR_LSB, LTFL — значение ЛС для локомотива
+//   0x93 (сервер → клиент): LTFL — ping, в ответ шлём 0x91
 final class TcpManager {
 
-    // Колбэки для внешнего кода (сейчас не используются, но оставлены на будущее)
-    interface Callback {
-        void onStart();
-        void onStop();
-        void onData(String data);
-        void onError(String message);
+    // Получатель значения ЛС из пакета 0x92
+    interface SignalListener {
+        void onSignal(int address, int ltfl);
     }
 
     // Колбэк старта поиска/подключения
@@ -53,21 +55,38 @@ final class TcpManager {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean destroyed = new AtomicBoolean(false);
 
-    // Допустимые диапазоны номера локомотива и состояния
-    private static final int LOCO_MIN = 1;
-    private static final int LOCO_MAX = 8;
-    private static final int STATE_MIN = 1;
-    private static final int STATE_MAX = 6;
+    // Допустимый диапазон адреса локомотива
+    static final int ADDRESS_MIN = 1;
+    static final int ADDRESS_MAX = 9999;
 
     // Параметры авто-подключения/таймаутов
     private static final long AUTO_RETRY_DELAY_MS = 1000;
     private static final long AUTO_RETRY_MAX_DELAY_MS = 30000;
     private static final int CONNECT_TIMEOUT_MS = 4000;
     private static final int READ_TIMEOUT_MS = 4000;
+    // Как часто повторяем регистрацию 0x91 для проверки связи
+    private static final long REGISTER_PERIOD_MS = 30000;
+    // Если от сервера ничего не приходит дольше этого времени — считаем связь потерянной.
+    // Сервер отвечает на каждый 0x91, так что тишина в 3 периода означает обрыв.
+    private static final long IDLE_TIMEOUT_MS = 3 * REGISTER_PERIOD_MS;
 
-    // Параметры протокола
-    private static final byte FRAME_START = 0x7E;
-    private static final int MAX_FRAME_LENGTH = 4096;
+    // Заголовки пакетов протокола ЛС
+    private static final int HDR_REGISTER = 0x91;
+    private static final int HDR_SIGNAL = 0x92;
+    private static final int HDR_PING = 0x93;
+    // Допустимая длина пакета (DataLen + Header + Data + XOR)
+    private static final int MIN_PACKET_LENGTH = 4;
+    private static final int MAX_PACKET_LENGTH = 6;
+
+    // Адрес локомотива, для которого запрашиваем ЛС (0 — не задан)
+    private volatile int locoAddress = 0;
+    private volatile SignalListener signalListener;
+    // Время последнего принятого байта
+    private volatile long lastRxAt = 0L;
+    // Входит ли Header в XOR. Реальный сервер ЛС считает XOR только по Data
+    // (как в таблице пакета 0x93), хотя общее правило спецификации включает Header.
+    // Начинаем с варианта сервера и подстраиваемся по его пакетам, если он изменится.
+    private volatile boolean xorWithHeader = false;
 
     // Авто-подключение
     private ScheduledFuture<?> autoTask;
@@ -108,6 +127,27 @@ final class TcpManager {
         this.onData = onData;
         this.onError = onError;
         this.onStatus = onStatus;
+
+        // Периодическая регистрация: сервер отвечает 0x92, это же служит проверкой связи
+        scheduler.scheduleWithFixedDelay(() -> {
+            try {
+                if (isConnected()) sendRegister();
+            } catch (Throwable ignored) {
+            }
+        }, REGISTER_PERIOD_MS, REGISTER_PERIOD_MS, TimeUnit.MILLISECONDS);
+    }
+
+    void setSignalListener(SignalListener listener) {
+        signalListener = listener;
+    }
+
+    // Смена адреса локомотива. Новый адрес сразу регистрируется на сервере.
+    void setLocoAddress(int address) {
+        if (address < ADDRESS_MIN || address > ADDRESS_MAX) return;
+        if (address == locoAddress) return;
+        locoAddress = address;
+        System.out.println("[TCP][LS] loco address=" + address);
+        if (isConnected()) sendRegister();
     }
 
     // Запрос ручного подключения к указанному хосту/порту
@@ -172,7 +212,14 @@ final class TcpManager {
                 System.out.println("[TCP][CONNECT] success host=" + host + " port=" + port);
                 noteAutoSuccess();
 
-                // Читаем поток и передаём байты в парсер фреймов
+                // Новое соединение — старые недочитанные байты не нужны
+                rxSize = 0;
+                lastRxAt = System.currentTimeMillis();
+
+                // Сразу регистрируем адрес локомотива, чтобы сервер прислал текущее ЛС
+                sendRegister();
+
+                // Читаем поток и передаём байты в парсер пакетов
                 InputStream in = new BufferedInputStream(newSock.getInputStream());
                 byte[] buf = new byte[512];
 
@@ -184,22 +231,19 @@ final class TcpManager {
                             break;
                         }
                         if (n > 0) {
-                            try {
-                                System.out.println("TCP RX (" + n + " bytes): " + toHex(buf, 0, n));
-                            } catch (Throwable ignored) {
-                            }
-                            // Выводим также принятые данные как строку (чтобы видеть текстовое содержимое)
-                            try {
-                                String s = new String(buf, 0, n);
-                                System.out.println("TCP RX (string): " + s);
-                                if (onData != null) onData.accept(s + "\n");
-                            } catch (Throwable ignored) {
-                            }
+                            lastRxAt = System.currentTimeMillis();
+                            String hex = toHex(buf, 0, n);
+                            System.out.println("[TCP][RX] " + n + " bytes: " + hex);
+                            safeOnData("[#TCP_RX#]" + hex + "\n");
                             feedRx(buf, 0, n);
-                            drainFrames();
+                            drainPackets();
                         }
                     } catch (SocketTimeoutException timeout) {
                         if (!running.get() || destroyed.get()) break;
+                        long idle = System.currentTimeMillis() - lastRxAt;
+                        if (idle > IDLE_TIMEOUT_MS) {
+                            throw new IOException("no data from server for " + (idle / 1000) + " s");
+                        }
                     }
                 }
             } catch (IOException e) {
@@ -317,48 +361,34 @@ final class TcpManager {
         return isConnected();
     }
 
-    // Сборка кадра управления: 0x7E | loco(1) | len(2 BE) | data(N) | CRC8
-    byte[] buildControlFrame(int loco, int state) {
-        int l = Math.max(LOCO_MIN, Math.min(LOCO_MAX, loco));
-        int st = Math.max(STATE_MIN, Math.min(STATE_MAX, state));
-
-        // Пока payload = один байт состояния
-        byte[] payload = new byte[]{(byte) st};
-        int len = payload.length;
-
-        byte lenHi = (byte) ((len >> 8) & 0xFF);
-        byte lenLo = (byte) (len & 0xFF);
-
-        byte[] crcBuf = new byte[3 + len];
-        crcBuf[0] = (byte) (l & 0xFF);
-        crcBuf[1] = lenHi;
-        crcBuf[2] = lenLo;
-        if (len > 0) System.arraycopy(payload, 0, crcBuf, 3, len);
-
-        byte crc = crc8(crcBuf, 0, crcBuf.length);
-
-        byte[] frame = new byte[1 + crcBuf.length + 1];
-        frame[0] = FRAME_START;
-        System.arraycopy(crcBuf, 0, frame, 1, crcBuf.length);
-        frame[frame.length - 1] = crc;
-        return frame;
+    // Сборка пакета регистрации 0x91: 05 | 91 | ADR_MSB | ADR_LSB | XOR.
+    // Старшие биты ADR_MSB (правило Z21 для адресов >= 128) здесь не ставятся.
+    // withHeader: XOR = Header^DB0^DB1 (общее правило спецификации), иначе XOR = DB0^DB1.
+    static byte[] buildRegisterPacket(int address, boolean withHeader) {
+        byte[] p = new byte[5];
+        p[0] = 0x05;
+        p[1] = (byte) HDR_REGISTER;
+        p[2] = (byte) ((address >> 8) & 0xFF);
+        p[3] = (byte) (address & 0xFF);
+        p[4] = withHeader ? xor(p, 1, 3) : xor(p, 2, 2);
+        return p;
     }
 
-    // Утилита: отдаёт собранный кадр в hex-виде для логов
-    String controlFrameHex(int loco, int state) {
-        byte[] frame = buildControlFrame(loco, state);
-        return toHex(frame, 0, frame.length);
+    // Регистрация текущего адреса локомотива на сервере
+    void sendRegister() {
+        int address = locoAddress;
+        if (address < ADDRESS_MIN || address > ADDRESS_MAX) return;
+        sendPacket(buildRegisterPacket(address, xorWithHeader));
     }
 
-    // Асинхронная отправка управляющего кадра
-    // Без повторов, ошибки только логируем через onError.
-    void sendControl(int loco, int state) {
+    // Асинхронная отправка пакета. Без повторов, ошибки только логируем через onError.
+    private void sendPacket(byte[] frame) {
         if (destroyed.get()) return;
         if (!isConnected()) return;
         if (writer.isShutdown()) return;
 
-        final byte[] frame = buildControlFrame(loco, state);
-        System.out.println("[TCP][SEND] frame: " + toHex(frame, 0, frame.length));
+        String hex = toHex(frame, 0, frame.length);
+        System.out.println("[TCP][SEND] frame: " + hex);
         writer.submit(() -> {
             try {
                 Socket sck;
@@ -367,13 +397,17 @@ final class TcpManager {
                 }
                 if (sck == null || sck.isClosed() || !sck.isConnected()) {
                     System.out.println("[TCP][SEND] socket not connected");
+                    safeOnData("TX не відправлено (немає з'єднання): " + hex + "\n");
                     return;
                 }
                 sck.getOutputStream().write(frame);
                 sck.getOutputStream().flush();
                 System.out.println("[TCP][SEND] frame sent");
+                // В консоль пишем только после реальной записи в сокет
+                safeOnData("[#TCP_TX#]" + hex + "\n");
             } catch (IOException e) {
                 System.out.println("[TCP][SEND] error: " + e.getMessage());
+                safeOnData("TX помилка: " + hex + " — " + e.getMessage() + "\n");
                 if (onError != null) onError.accept("TCP TX error: " + e.getMessage());
                 running.set(false);
                 closeQuietly();
@@ -480,63 +514,113 @@ final class TcpManager {
         rxBuf = nb;
     }
 
-    // Разбор буфера на кадры протокола: 0x7E | loco(1) | len(2 BE) | data(N) | CRC8
-    private void drainFrames() {
-        int i = 0;
-        while (true) {
-            // Ищем стартовый байт
-            while (i < rxSize && rxBuf[i] != FRAME_START) i++;
-            if (i >= rxSize) {
-                rxSize = 0;
-                return;
-            }
+    // Длина пакета для известного заголовка, или -1 если заголовок неизвестен
+    private static int expectedLength(int header) {
+        switch (header) {
+            case HDR_REGISTER: return 5;
+            case HDR_SIGNAL: return 6;
+            case HDR_PING: return 4;
+            default: return -1;
+        }
+    }
 
-            // Сдвигаем буфер так, чтобы кадр начинался с 0
-            if (i > 0) {
-                System.arraycopy(rxBuf, i, rxBuf, 0, rxSize - i);
-                rxSize -= i;
-                i = 0;
-            }
-
-            // Ждём заголовок: минимум 5 байт (1 + 1 + 2 + 1)
-            if (rxSize < 5) return;
-
-            int loco = rxBuf[1] & 0xFF;
-            int len = ((rxBuf[2] & 0xFF) << 8) | (rxBuf[3] & 0xFF);
-            int total = 1 + 1 + 2 + len + 1;
-
-            // Защита от мусорной длины
-            if (len < 0 || len > MAX_FRAME_LENGTH) {
+    // Разбор буфера на пакеты ЛС: DataLen | Header | Data(N) | XOR.
+    // Маркера начала в протоколе нет, поэтому начало пакета узнаём по паре DataLen + Header:
+    // всё, что не похоже на известный пакет, пропускаем по одному байту.
+    private void drainPackets() {
+        while (rxSize > 0) {
+            int len = rxBuf[0] & 0xFF;
+            if (len < MIN_PACKET_LENGTH || len > MAX_PACKET_LENGTH) {
                 consume(1);
                 continue;
             }
 
-            // Ждём пока придут все байты кадра
-            if (rxSize < total) return;
-
-            // Проверяем CRC по loco+len+data
-            byte crcExpected = rxBuf[total - 1];
-            byte crc = crc8(rxBuf, 1, 3 + len);
-            if (crc != crcExpected) {
+            // Ждём заголовок
+            if (rxSize < 2) return;
+            if (expectedLength(rxBuf[1] & 0xFF) != len) {
                 consume(1);
                 continue;
             }
 
-            // Валидный кадр
-            if (len == 1) {
-                int state = rxBuf[4] & 0xFF;
-                String line = String.format(Locale.US,
-                        "cmd=0x%02X loco=%d state=%d\n", loco, loco, state);
-                safeOnData(line);
-            } else {
-                String line = String.format(Locale.US,
-                        "cmd=0x%02X len=%d data=%s\n",
-                        loco, len, toHex(rxBuf, 4, len));
-                safeOnData(line);
+            // Ждём, пока придёт весь пакет
+            if (rxSize < len) return;
+
+            int variant = checksumVariant(rxBuf, len);
+            if (variant == XOR_BAD) {
+                System.out.println("[TCP][RX] bad XOR: " + toHex(rxBuf, 0, len));
+                consume(1);
+                continue;
             }
 
-            // Съедаем обработанный кадр и продолжаем
-            consume(total);
+            // Считаем XOR так же, как сервер: по его пакетам видно, входит ли Header в сумму
+            boolean serverWithHeader = variant == XOR_WITH_HEADER;
+            if (serverWithHeader != xorWithHeader) {
+                xorWithHeader = serverWithHeader;
+                String mode = serverWithHeader ? "Header^Data" : "тільки Data";
+                System.out.println("[TCP][LS] server XOR mode: " + mode);
+                safeOnData("ЛС: сервер рахує XOR як " + mode + ", відправляю так само\n");
+                boolean isPing = (rxBuf[1] & 0xFF) == HDR_PING;
+                handlePacket(rxBuf, len);
+                consume(len);
+                // Прежние 0x91 сервер мог отбросить — регистрируемся заново
+                // (на ping handlePacket уже ответил регистрацией)
+                if (!isPing) sendRegister();
+                continue;
+            }
+
+            handlePacket(rxBuf, len);
+            consume(len);
+        }
+    }
+
+    private static final int XOR_BAD = 0;
+    private static final int XOR_WITH_HEADER = 1;
+    private static final int XOR_DATA_ONLY = 2;
+
+    // Как посчитан XOR в пакете. По общему правилу спецификации это Header^Data,
+    // но в таблице пакета 0x93 указано "XOR = DB0" (без Header) — принимаем оба варианта.
+    // Header всегда ненулевой, поэтому оба варианта сразу совпасть не могут.
+    private static int checksumVariant(byte[] p, int len) {
+        byte expected = p[len - 1];
+        int dataCount = len - 3;
+        if (xor(p, 1, dataCount + 1) == expected) return XOR_WITH_HEADER;
+        if (dataCount > 0 && xor(p, 2, dataCount) == expected) return XOR_DATA_ONLY;
+        return XOR_BAD;
+    }
+
+    // Обработка одного проверенного пакета
+    private void handlePacket(byte[] p, int len) {
+        int header = p[1] & 0xFF;
+        if (header == HDR_SIGNAL) {
+            // Старшие биты адреса по протоколу не используются, но маскируем на всякий случай
+            int address = (((p[2] & 0xFF) << 8) | (p[3] & 0xFF)) & 0x3FFF;
+            int ltfl = p[4] & 0xFF;
+            System.out.println("[TCP][LS] signal address=" + address + " ltfl=" + ltfl);
+            safeOnData(String.format(Locale.US, "ЛС: адреса=%d LTFL=%d (%s)\n",
+                    address, ltfl, ltflName(ltfl)));
+            SignalListener l = signalListener;
+            if (l != null) {
+                try {
+                    l.onSignal(address, ltfl);
+                } catch (Throwable ignored) {
+                }
+            }
+        } else if (header == HDR_PING) {
+            safeOnData("ЛС: ping\n");
+            sendRegister();
+        }
+        // 0x91 сервер не шлёт — игнорируем
+    }
+
+    static String ltflName(int ltfl) {
+        switch (ltfl) {
+            case 0: return "не визначено";
+            case 1: return "зелений";
+            case 2: return "жовтий";
+            case 3: return "жовтий з червоним";
+            case 4: return "червоний";
+            case 5: return "білий";
+            default: return "?";
         }
     }
 
@@ -558,20 +642,13 @@ final class TcpManager {
         }
     }
 
-    // Подсчёт CRC8 с полиномом 0x31 (как на стороне ESP)
-    private static byte crc8(byte[] buf, int off, int len) {
-        int crc = 0x00;
+    // XOR байтов buf[off .. off+len-1]
+    private static byte xor(byte[] buf, int off, int len) {
+        int x = 0;
         for (int i = off; i < off + len; i++) {
-            crc ^= (buf[i] & 0xFF);
-            for (int b = 0; b < 8; b++) {
-                if ((crc & 0x80) != 0) {
-                    crc = ((crc << 1) ^ 0x31) & 0xFF;
-                } else {
-                    crc = (crc << 1) & 0xFF;
-                }
-            }
+            x ^= (buf[i] & 0xFF);
         }
-        return (byte) (crc & 0xFF);
+        return (byte) x;
     }
 
     // Перевод байтов в строку вида "7E 01 00 01 FF"
@@ -628,33 +705,6 @@ final class TcpManager {
             return socket != null ? socket.getPort() : -1;
         } catch (Throwable t) {
             return -1;
-        }
-    }
-
-    // Отправка серверу уведомления о штатном завершении клиента
-    void sendClientShutdownNotice() {
-        if (!isConnected()) {
-            return;
-        }
-
-        Socket sck;
-        synchronized (this) {
-            sck = socket;
-        }
-        if (sck == null || sck.isClosed() || !sck.isConnected()) {
-            return;
-        }
-
-        try {
-            // Текстовое уведомление для сервера
-            String msg = "[CLIENT] DISCONNECT\n";
-            sck.getOutputStream().write(msg.getBytes("UTF-8"));
-            sck.getOutputStream().flush();
-            System.out.println("[TCP][SEND] shutdown notice: " + msg);
-            System.out.println("[TCP][GOODBYE] disconnect notice sent");
-        } catch (Exception e) {
-            // Если не получилось — просто логируем и продолжаем гаситься
-            System.out.println("[TCP][GOODBYE] send failed: " + e.getMessage());
         }
     }
 

@@ -9,8 +9,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.util.Log;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -45,10 +43,10 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // Реакция только на изменения IP/порта
+        // Изменились IP/порт сервера ЛС — переподключаемся
         if (AppState.KEY_TCP_HOST.equals(key) || AppState.KEY_TCP_PORT.equals(key)) {
-            String host = sharedPrefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
-            int port = sharedPrefs.getInt(AppState.KEY_TCP_PORT, 9000);
+            String host = sharedPrefs.getString(AppState.KEY_TCP_HOST, AppState.DEFAULT_TCP_HOST);
+            int port = sharedPrefs.getInt(AppState.KEY_TCP_PORT, AppState.DEFAULT_TCP_PORT);
             if (host != null) {
                 host = host.trim();
             }
@@ -59,6 +57,23 @@ public class MainActivity extends AppCompatActivity {
 
             // Запускаем авто-подключение к новому адресу
             tcpManager.enableAutoConnect(host, port);
+        }
+
+        // Выбран другой локомотив — регистрируем его адрес на сервере.
+        // Пока сервер не ответил, значение ЛС неизвестно.
+        if (AppState.KEY_LOCO_ADDRESS.equals(key)) {
+            AppState.lastSignalState = 0;
+            updateStateFromExternal(AppState.stripStateForLtfl(0));
+            tcpManager.setLocoAddress(AppState.getLocoAddress(sharedPrefs));
+        }
+
+        // Режим редактирования окна выключен — показываем актуальное значение ЛС
+        if (AppState.KEY_OVERLAY_ALLOW_MODIFICATION.equals(key)
+                && !sharedPrefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true)) {
+            int state = AppState.lastSignalState > 0
+                    ? AppState.lastSignalState
+                    : AppState.stripStateForLtfl(0);
+            updateStateFromExternal(state);
         }
     };
 
@@ -87,66 +102,11 @@ public class MainActivity extends AppCompatActivity {
                     AppState.tcpConnecting = false;
                 }),
                 data -> {
+                    // Показываем входящие/исходящие пакеты и служебные сообщения в UI-консоли
                     if (data == null || data.isEmpty()) {
                         return;
                     }
-                    // Показываем все входящие данные в UI-консоли
-                    try {
-                        AppState.consoleQueue.offer(data);
-                    } catch (Throwable ignored) {}
-                    String[] lines = data.split("\n");
-                    int locoTarget = AppState.selectedLoco.get();
-                    Pattern p = Pattern.compile("L(\\d+):S(\\d+)");
-                    for (String line : lines) {
-                        if (line == null) {
-                            continue;
-                        }
-                        String ln = line.trim();
-                        if (ln.isEmpty()) {
-                            continue;
-                        }
-
-                        if (ln.startsWith("[TCP]")) {
-                            continue;
-                        }
-
-                        // Формат: Lx:Sx (например "L1:S1 L2:S2 ...") — поддерживаем короткий формат
-                        try {
-                            Matcher m = p.matcher(ln);
-                            boolean handledCurrent = false;
-                            while (m.find()) {
-                                int locoVal = Integer.parseInt(m.group(1));
-                                int stateVal = Integer.parseInt(m.group(2));
-                                
-                                // Сохраняем состояние для всех локомотивов
-                                if (locoVal >= 1 && locoVal <= 8 && stateVal >= 1 && stateVal <= 6) {
-                                    AppState.locoStates[locoVal - 1].set(stateVal);
-                                    
-                                    // Применяем только если это текущий локомотив
-                                    if (locoVal == locoTarget) {
-                                        final int stateCopy = stateVal;
-                                        runOnUiThread(() -> updateStateFromExternal(stateCopy));
-                                        handledCurrent = true;
-                                    }
-                                }
-                            }
-                            if (handledCurrent) continue;
-                        } catch (Throwable ignored) {}
-
-                        int locoVal = extractDecimal(ln, "loco=");
-                        int stateVal = extractDecimal(ln, "state=");
-                        
-                        // Сохраняем состояние для указанного локомотива
-                        if (locoVal >= 1 && locoVal <= 8 && stateVal >= 1 && stateVal <= 6) {
-                            AppState.locoStates[locoVal - 1].set(stateVal);
-                            
-                            // Применяем только если это текущий локомотив
-                            if (locoVal == locoTarget) {
-                                final int stateCopy = stateVal;
-                                runOnUiThread(() -> updateStateFromExternal(stateCopy));
-                            }
-                        }
-                    }
+                    AppState.consoleQueue.offer(data);
                 },
                 error -> {
                     // suppress UI noise
@@ -162,19 +122,29 @@ public class MainActivity extends AppCompatActivity {
                 })
         );
 
+        // Значение ЛС от сервера: применяем, только если оно для выбранного локомотива
+        tcpManager.setSignalListener((address, ltfl) -> {
+            if (address != AppState.getLocoAddress(prefs)) {
+                return;
+            }
+            int state = AppState.stripStateForLtfl(ltfl);
+            AppState.lastSignalState = state;
+            runOnUiThread(() -> updateStateFromExternal(state));
+        });
+
         prefs = getSharedPreferences(AppState.PREFS_NAME, MODE_PRIVATE);
+        AppState.migrateTcpDefaults(prefs);
         prefs.registerOnSharedPreferenceChangeListener(prefListener);
-        
-        // Установим начальный цвет светофора — белый (state=5) ДО запуска сервиса
-        int initialState = AppState.locoStates[AppState.selectedLoco.get() - 1].get();
-        applyStripState(initialState, false);
-        
-        String initHost = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
-        int initPort = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
+
+        // Пока сервер не прислал значение ЛС — показываем «все огни»
+        applyStripState(AppState.stripStateForLtfl(0));
+
+        tcpManager.setLocoAddress(AppState.getLocoAddress(prefs));
+
+        String initHost = prefs.getString(AppState.KEY_TCP_HOST, AppState.DEFAULT_TCP_HOST);
+        int initPort = prefs.getInt(AppState.KEY_TCP_PORT, AppState.DEFAULT_TCP_PORT);
         if (initHost != null) initHost = initHost.trim();
         tcpManager.enableAutoConnect(initHost, initPort);
-
-        StateBus.publishOverlaySelection(1);
 
         tcpStatusTimer = new java.util.Timer();
         tcpStatusTimer.scheduleAtFixedRate(new java.util.TimerTask() {
@@ -247,8 +217,8 @@ public class MainActivity extends AppCompatActivity {
             prefs.registerOnSharedPreferenceChangeListener(prefListener);
         }
 
-        String host = prefs.getString(AppState.KEY_TCP_HOST, "192.168.2.6");
-        int port = prefs.getInt(AppState.KEY_TCP_PORT, 9000);
+        String host = prefs.getString(AppState.KEY_TCP_HOST, AppState.DEFAULT_TCP_HOST);
+        int port = prefs.getInt(AppState.KEY_TCP_PORT, AppState.DEFAULT_TCP_PORT);
         if (host != null) host = host.trim();
         tcpManager.updateTarget(host, port);
 
@@ -311,36 +281,26 @@ public class MainActivity extends AppCompatActivity {
         overridePendingTransition(0, 0);
     }
 
+    // Выбор состояния касанием по overlay. Сервер ЛС не принимает команды,
+    // поэтому меняем только отображение.
     private void handleOverlaySelection(int state) {
-        if (state < 1 || state > 6) {
-            return;
-        }
-        applyStripState(state, true);
+        applyStripState(state);
     }
 
-    private void applyStripState(int state, boolean sendCommands) {
+    private void applyStripState(int state) {
         if (state < 1 || state > 6) {
             return;
         }
         currentState = state;
-        
-        // Сохраняем состояние для текущего локомотива
-        int currentLoco = AppState.selectedLoco.get();
-        if (currentLoco >= 1 && currentLoco <= 8) {
-            AppState.locoStates[currentLoco - 1].set(state);
-        }
-        
-        if (sendCommands) {
-            sendExclusiveRelays(state);
-        }
         StateBus.publishStripState(state);
     }
 
+    // Значение от сервера ЛС. В режиме редактирования окна не применяем.
     private void updateStateFromExternal(int state) {
         if (state < 1 || state > 6) {
             return;
         }
-        if (state == currentState) {
+        if (state == StateBus.getCurrentState()) {
             return;
         }
         boolean allowModification = prefs.getBoolean(AppState.KEY_OVERLAY_ALLOW_MODIFICATION, true);
@@ -348,38 +308,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         currentState = state;
-        
-        // Сохраняем состояние для текущего локомотива
-        int currentLoco = AppState.selectedLoco.get();
-        if (currentLoco >= 1 && currentLoco <= 8) {
-            AppState.locoStates[currentLoco - 1].set(state);
-        }
-        
         StateBus.publishStripState(state);
-    }
-
-    private int extractDecimal(String line, String token) {
-        if (line == null || token == null) {
-            return -1;
-        }
-        int idx = line.indexOf(token);
-        if (idx < 0) {
-            return -1;
-        }
-        int pos = idx + token.length();
-        int value = 0;
-        boolean has = false;
-        while (pos < line.length()) {
-            char c = line.charAt(pos);
-            if (c >= '0' && c <= '9') {
-                value = value * 10 + (c - '0');
-                has = true;
-                pos++;
-            } else {
-                break;
-            }
-        }
-        return has ? value : -1;
     }
 
     private void ensureOverlayServiceRunning() {
@@ -434,15 +363,6 @@ public class MainActivity extends AppCompatActivity {
             if (canDrawOverlays()) {
                 ensureOverlayServiceRunning();
             }
-        }
-    }
-
-    private void sendExclusiveRelays(int active) {
-        int loco = AppState.selectedLoco.get();
-        // Диапазон протокола: 1..5
-        int state = Math.max(1, Math.min(5, active));
-        tcpManager.sendControl(loco, state);
-        if (tcpManager.connectionActive()) {
         }
     }
 }
